@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Робоче місце перевіряючого</title>
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234c9aff'/%3E%3Ctext x='16' y='22' font-size='14' font-family='sans-serif' fill='white' text-anchor='middle'%3EПЧ%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="mark">ПЧ</span>
+    <div class="brand-text">
+      <div class="brand-title">Робоче місце перевіряючого</div>
+      <div class="brand-sub" id="template-line">Система приймання та перевірки звітів</div>
+    </div>
+  </div>
+  <div class="top-actions">
+    <button class="btn btn-ghost" id="btn-backup" title="Зберегти реєстр у файл на ваш компʼютер">
+      Резервна копія
+    </button>
+    <button class="btn btn-ghost" id="btn-restore" title="Відновити реєстр із файлу резервної копії">
+      Відновити
+    </button>
+    <input type="file" id="restore-input" accept=".json" hidden>
+    <button class="btn btn-primary" id="btn-upload">＋ Завантажити файли</button>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="stats" id="stats">
+    <div class="stat" data-key="total">
+      <div class="stat-label">Отримано файлів</div>
+      <div class="stat-value">—</div>
+    </div>
+    <div class="stat" data-key="new">
+      <div class="stat-label">Очікують перевірки</div>
+      <div class="stat-value">—</div>
+    </div>
+    <div class="stat" data-key="checked">
+      <div class="stat-label">Перевірено</div>
+      <div class="stat-value">—</div>
+    </div>
+    <div class="stat" data-key="accepted">
+      <div class="stat-label">Прийнято</div>
+      <div class="stat-value">—</div>
+    </div>
+    <div class="stat" data-key="rework">
+      <div class="stat-label">На доопрацювання</div>
+      <div class="stat-value">—</div>
+    </div>
+    <div class="stat" data-key="rejected">
+      <div class="stat-label">Відхилено</div>
+      <div class="stat-value">—</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Реєстр подань</h2>
+      <div class="filters">
+        <input type="search" id="search" placeholder="Пошук: підрозділ, файл, номер">
+        <button class="btn btn-ghost btn-sm" id="btn-export-register"
+                title="Зберегти реєстр подань у файл Excel">Експорт реєстру</button>
+        <select id="filter-status">
+          <option value="">Усі статуси</option>
+        </select>
+        <button class="btn btn-ghost btn-sm" id="btn-reload">Оновити</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="register">
+        <thead>
+          <tr>
+            <th data-order="number">Номер</th>
+            <th data-order="unit">Підрозділ</th>
+            <th>Файл</th>
+            <th data-order="received_at">Отримано</th>
+            <th data-order="uploaded_at">Завантажено</th>
+            <th data-order="errors">Зауваження</th>
+            <th data-order="status">Статус</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="register-body">
+          <tr><td colspan="8" class="empty">Завантаження…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Останні операції</h2></div>
+    <ul class="timeline" id="timeline"></ul>
+  </section>
+
+</main>
+
+<!-- Деталі подання -->
+<div class="drawer-backdrop" id="backdrop"></div>
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <div>
+      <div class="drawer-title" id="drawer-title">Подання</div>
+      <div class="drawer-sub" id="drawer-sub"></div>
+    </div>
+    <button class="btn btn-ghost btn-sm" id="drawer-close">Закрити</button>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
+
+<!-- Завантаження -->
+<div class="modal" id="upload-modal" aria-hidden="true">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3>Приймання файлів</h3>
+      <button class="btn btn-ghost btn-sm" id="upload-close">Закрити</button>
+    </div>
+    <div class="modal-body">
+      <label class="field">
+        <span>Підрозділ</span>
+        <input type="text" id="upload-unit" placeholder="Назва підрозділу">
+      </label>
+      <div class="dropzone" id="dropzone">
+        <input type="file" id="upload-files" accept=".xlsx" multiple hidden>
+        <p><strong>Перетягніть файли XLSX</strong> або натисніть, щоб вибрати</p>
+        <p class="hint">Можна кілька файлів одразу. Файли обробляються лише у вашому браузері й нікуди не надсилаються.</p>
+      </div>
+      <ul class="file-list" id="file-list"></ul>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" id="upload-cancel">Скасувати</button>
+      <button class="btn btn-primary" id="upload-send" disabled>Завантажити</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="xlsx.js"></script>
+<script src="checker.js"></script>
+<script src="storage.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

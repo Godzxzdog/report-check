@@ -1,0 +1,11 @@
+01_good.xlsx	ok
+02_no_sheet.xlsx	critical
+03_bad_header.xlsx	critical
+04_empty_required.xlsx	error
+05_bad_dates.xlsx	error
+06_bad_number.xlsx	error
+07_duplicates.xlsx	error
+08_bad_totals.xlsx	error
+09_spaces.xlsx	warning
+10_negative.xlsx	error
+11_broken.xlsx	critical

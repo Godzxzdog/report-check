@@ -1,0 +1,117 @@
+{
+  "version": "1.0",
+  "title": "Приклад затвердженого шаблону звіту підрозділу",
+  "note": "Замініть цей файл на опис реального шаблону. Усі правила перевірки виводяться звідси.",
+  "sheets": [
+    {
+      "name": "Звіт",
+      "required": true,
+      "header_row": 1,
+      "data_start_row": 2,
+      "columns": [
+        {
+          "name": "Підрозділ",
+          "key": "unit",
+          "type": "text",
+          "required": true,
+          "max_length": 120
+        },
+        {
+          "name": "Дата",
+          "key": "date",
+          "type": "date",
+          "required": true,
+          "format": "DD.MM.YYYY"
+        },
+        {
+          "name": "Кількість",
+          "key": "qty",
+          "type": "number",
+          "required": true,
+          "min": 0
+        },
+        {
+          "name": "Виконано",
+          "key": "done",
+          "type": "number",
+          "required": true,
+          "min": 0
+        },
+        {
+          "name": "Відсоток",
+          "key": "pct",
+          "type": "number",
+          "required": false,
+          "min": 0,
+          "max": 100
+        },
+        {
+          "name": "Примітка",
+          "key": "note",
+          "type": "text",
+          "required": false,
+          "max_length": 300
+        }
+      ],
+      "unique_by": [
+        "unit",
+        "date"
+      ],
+      "totals": [
+        {
+          "id": "done_le_qty",
+          "description": "Виконано не може перевищувати кількість",
+          "left": {
+            "column": "done",
+            "agg": "sum"
+          },
+          "op": "<=",
+          "right": {
+            "column": "qty",
+            "agg": "sum"
+          }
+        },
+        {
+          "id": "pct_plausible",
+          "description": "Середній відсоток має бути в межах 0–100",
+          "left": {
+            "column": "pct",
+            "agg": "avg"
+          },
+          "op": ">=",
+          "right": {
+            "value": 0
+          }
+        }
+      ],
+      "row_checks": [
+        {
+          "id": "row_pct_le_100",
+          "description": "Відсоток у рядку не може бути більшим за 100",
+          "when": {
+            "column": "pct",
+            "is": "filled"
+          },
+          "assert": {
+            "column": "pct",
+            "op": "<=",
+            "value": 100
+          }
+        },
+        {
+          "id": "row_done_le_qty",
+          "description": "Виконано в рядку не може перевищувати кількість",
+          "when": {
+            "column": "qty",
+            "is": "filled"
+          },
+          "assert": {
+            "column": "done",
+            "op": "<=",
+            "column_ref": "qty"
+          }
+        }
+      ]
+    }
+  ]
+}
