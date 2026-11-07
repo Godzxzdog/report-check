@@ -3,7 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Робоче місце перевіряючого</title>
+<meta name="color-scheme" content="dark">
+<title>Приймання щоденних розрахунків</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234c9aff'/%3E%3Ctext x='16' y='22' font-size='13' font-family='sans-serif' fill='white' text-anchor='middle'%3EПЧ%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -12,88 +14,148 @@
   <div class="brand">
     <span class="mark">ПЧ</span>
     <div class="brand-text">
-      <div class="brand-title">Робоче місце перевіряючого</div>
-      <div class="brand-sub" id="template-line">Система приймання та перевірки звітів</div>
+      <div class="brand-title">Приймання щоденних розрахунків</div>
+      <div class="brand-sub" id="template-line">Шаблон v1.3</div>
     </div>
   </div>
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="day">Доба</button>
+    <button class="tab" data-tab="register">Реєстр</button>
+    <button class="tab" data-tab="calendar">Календар</button>
+    <button class="tab" data-tab="persons">Особи</button>
+    <button class="tab" data-tab="certs">Довідки</button>
+  </nav>
   <div class="top-actions">
-    <button class="btn btn-ghost" id="btn-backup" title="Зберегти реєстр у файл на ваш компʼютер">
-      Резервна копія
-    </button>
-    <button class="btn btn-ghost" id="btn-restore" title="Відновити реєстр із файлу резервної копії">
-      Відновити
-    </button>
+    <button class="btn btn-ghost" id="btn-backup" title="Зберегти реєстр у файл">Копія</button>
+    <button class="btn btn-ghost" id="btn-restore" title="Відновити з файлу">Відновити</button>
     <input type="file" id="restore-input" accept=".json" hidden>
-    <button class="btn btn-primary" id="btn-upload">＋ Завантажити файли</button>
+    <button class="btn btn-primary" id="btn-upload">＋ Завантажити</button>
   </div>
 </header>
 
 <main class="wrap">
 
-  <section class="stats" id="stats">
-    <div class="stat" data-key="total">
-      <div class="stat-label">Отримано файлів</div>
-      <div class="stat-value">—</div>
+  <!-- ===== Доба ===== -->
+  <section class="view active" id="view-day">
+    <div class="daybar">
+      <button class="btn btn-ghost btn-sm" id="day-prev">←</button>
+      <input type="date" id="day-picker">
+      <button class="btn btn-ghost btn-sm" id="day-next">→</button>
+      <span class="day-label" id="day-label"></span>
+      <button class="btn btn-ghost btn-sm" id="day-today">Сьогодні</button>
     </div>
-    <div class="stat" data-key="new">
-      <div class="stat-label">Очікують перевірки</div>
-      <div class="stat-value">—</div>
-    </div>
-    <div class="stat" data-key="checked">
-      <div class="stat-label">Перевірено</div>
-      <div class="stat-value">—</div>
-    </div>
-    <div class="stat" data-key="accepted">
-      <div class="stat-label">Прийнято</div>
-      <div class="stat-value">—</div>
-    </div>
-    <div class="stat" data-key="rework">
-      <div class="stat-label">На доопрацювання</div>
-      <div class="stat-value">—</div>
-    </div>
-    <div class="stat" data-key="rejected">
-      <div class="stat-label">Відхилено</div>
-      <div class="stat-value">—</div>
-    </div>
-  </section>
 
-  <section class="panel">
-    <div class="panel-head">
-      <h2>Реєстр подань</h2>
-      <div class="filters">
-        <input type="search" id="search" placeholder="Пошук: підрозділ, файл, номер">
-        <button class="btn btn-ghost btn-sm" id="btn-export-register"
-                title="Зберегти реєстр подань у файл Excel">Експорт реєстру</button>
-        <select id="filter-status">
-          <option value="">Усі статуси</option>
-        </select>
-        <button class="btn btn-ghost btn-sm" id="btn-reload">Оновити</button>
+    <div class="stats" id="day-stats">
+      <div class="stat"><div class="stat-label">ПУ очікуються</div><div class="stat-value" data-k="expected">—</div></div>
+      <div class="stat"><div class="stat-label">Отримано</div><div class="stat-value" data-k="received">—</div></div>
+      <div class="stat"><div class="stat-label">Прийнято</div><div class="stat-value" data-k="accepted">—</div></div>
+      <div class="stat"><div class="stat-label">На доопрацюванні</div><div class="stat-value" data-k="rework">—</div></div>
+      <div class="stat"><div class="stat-label">Осіб у прийнятих</div><div class="stat-value" data-k="persons">—</div></div>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Стан по ПУ за добу</h2>
+        <button class="btn btn-ghost btn-sm" id="btn-day-summary">Зведення за добу</button>
       </div>
-    </div>
-    <div class="table-wrap">
-      <table class="register">
-        <thead>
-          <tr>
-            <th data-order="number">Номер</th>
-            <th data-order="unit">Підрозділ</th>
-            <th>Файл</th>
-            <th data-order="received_at">Отримано</th>
-            <th data-order="uploaded_at">Завантажено</th>
-            <th data-order="errors">Зауваження</th>
-            <th data-order="status">Статус</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="register-body">
-          <tr><td colspan="8" class="empty">Завантаження…</td></tr>
-        </tbody>
-      </table>
-    </div>
+      <div id="units-status" class="unit-grid"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Останні операції</h2></div>
+      <ul class="timeline" id="day-timeline"></ul>
+    </section>
   </section>
 
-  <section class="panel">
-    <div class="panel-head"><h2>Останні операції</h2></div>
-    <ul class="timeline" id="timeline"></ul>
+  <!-- ===== Реєстр ===== -->
+  <section class="view" id="view-register">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Реєстр подань</h2>
+        <div class="filters">
+          <input type="search" id="reg-search" placeholder="Пошук: ПУ, файл, номер">
+          <select id="reg-status"><option value="">Усі статуси</option></select>
+          <button class="btn btn-ghost btn-sm" id="reg-export">Експорт</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="register">
+          <thead>
+            <tr>
+              <th data-order="number">Номер</th>
+              <th data-order="unit">ПУ</th>
+              <th data-order="dayIso">Доба</th>
+              <th>Версія</th>
+              <th>Файл</th>
+              <th data-order="errors">Зауваження</th>
+              <th data-order="status">Статус</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="reg-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </section>
+
+  <!-- ===== Календар ===== -->
+  <section class="view" id="view-calendar">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Календар подань</h2>
+        <div class="filters">
+          <input type="month" id="cal-month">
+          <span class="legend">
+            <span class="lg lg-missing"></span> пропуск
+            <span class="lg lg-skipped"></span> не очікується
+            <span class="lg lg-accepted"></span> прийнято
+            <span class="lg lg-rework"></span> на доопрацюванні
+          </span>
+        </div>
+      </div>
+      <div class="table-wrap"><table class="calendar" id="cal-table"></table></div>
+    </section>
+  </section>
+
+  <!-- ===== Особи ===== -->
+  <section class="view" id="view-persons">
+    <section class="panel" id="panel-suspicious">
+      <div class="panel-head"><h2>Підозрілі ПІБ</h2></div>
+      <div id="suspicious-list"></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Реєстр осіб</h2>
+        <div class="filters">
+          <input type="search" id="person-search" placeholder="Пошук за ПІБ">
+          <button class="btn btn-ghost btn-sm" id="persons-export">Експорт</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="register">
+          <thead><tr>
+            <th>ПІБ</th><th>Звання</th><th>Посада</th><th>в/ч</th>
+            <th>ПУ</th><th>Діб у системі</th><th></th>
+          </tr></thead>
+          <tbody id="persons-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </section>
+
+  <!-- ===== Довідки ===== -->
+  <section class="view" id="view-certs">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Місячні довідки про чергування</h2>
+        <div class="filters">
+          <input type="month" id="cert-month">
+          <button class="btn btn-primary btn-sm" id="cert-build">Сформувати</button>
+        </div>
+      </div>
+      <div id="cert-issues"></div>
+      <div id="cert-results"></div>
+    </section>
   </section>
 
 </main>
@@ -119,20 +181,18 @@
       <button class="btn btn-ghost btn-sm" id="upload-close">Закрити</button>
     </div>
     <div class="modal-body">
-      <label class="field">
-        <span>Підрозділ</span>
-        <input type="text" id="upload-unit" placeholder="Назва підрозділу">
-      </label>
       <div class="dropzone" id="dropzone">
         <input type="file" id="upload-files" accept=".xlsx" multiple hidden>
         <p><strong>Перетягніть файли XLSX</strong> або натисніть, щоб вибрати</p>
-        <p class="hint">Можна кілька файлів одразу. Файли обробляються лише у вашому браузері й нікуди не надсилаються.</p>
+        <p class="hint">Можна кілька файлів одразу. ПУ і доба визначаються зі шапки.
+          Файли обробляються лише у вашому браузері й нікуди не надсилаються.</p>
       </div>
       <ul class="file-list" id="file-list"></ul>
+      <div id="upload-result"></div>
     </div>
     <div class="modal-foot">
       <button class="btn btn-ghost" id="upload-cancel">Скасувати</button>
-      <button class="btn btn-primary" id="upload-send" disabled>Завантажити</button>
+      <button class="btn btn-primary" id="upload-send" disabled>Перевірити й прийняти</button>
     </div>
   </div>
 </div>

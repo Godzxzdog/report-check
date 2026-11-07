@@ -1,36 +1,72 @@
-/* storage.js — реєстр у localStorage.
-   Оригінали файлів не зберігаються в браузері (обмеження Pages):
-   зберігаються подання, результати перевірки, історія рішень,
-   а також текстовий зліпок вмісту для повторної перевірки. */
+/* storage.js — реєстр у localStorage для щоденних розрахунків.
+   Оригінали XLSX у браузері не зберігаються: зберігаються подання, версії,
+   результати перевірки, записи присутності, реєстр осіб і журнал. */
 
-const STORE_KEY = 'reportCheck.v1';
+const STORE_KEY = 'reportcheck.v41';
 const STATUS_LABELS = {
   new: 'Новий',
   checking: 'На перевірці',
   checked: 'Перевірено',
   accepted: 'Прийнято',
+  accepted_notes: 'Прийнято із зауваженнями',
   rework: 'На доопрацювання',
   rejected: 'Відхилено',
+  replaced: 'Замінено',
+};
+const STATUS_SHORT = {
+  new: 'Новий',
+  checking: 'На перевірці',
+  checked: 'Перевірено',
+  accepted: 'Прийнято',
+  accepted_notes: 'З зауваженнями',
+  rework: 'На доопрацювання',
+  rejected: 'Відхилено',
+  replaced: 'Замінено',
+};
+
+const VERDICT_LABEL = {
+  ok: 'Без зауважень',
+  info: 'Лише інформація',
+  warning: 'Попередження',
+  error: 'Є помилки',
+  critical: 'Непридатний',
+};
+
+const EMPTY_STATE = {
+  submissions: [],
+  persons: [],
+  aliases: [],
+  months: {},
+  skips: [],
+  events: [],
 };
 
 function loadState() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
-    if (!raw) return { submissions: [], events: [], counter: 0 };
+    if (!raw) return JSON.parse(JSON.stringify(EMPTY_STATE));
     const data = JSON.parse(raw);
-    if (!Array.isArray(data.submissions)) return { submissions: [], events: [], counter: 0 };
     return {
-      submissions: data.submissions,
+      submissions: data.submissions || [],
+      persons: data.persons || [],
+      aliases: data.aliases || [],
+      months: data.months || {},
+      skips: data.skips || [],
       events: data.events || [],
-      counter: data.counter || data.submissions.length,
     };
   } catch (err) {
-    return { submissions: [], events: [], counter: 0 };
+    return JSON.parse(JSON.stringify(EMPTY_STATE));
   }
 }
 
 function saveState(state) {
-  localStorage.setItem(STORE_KEY, JSON.stringify(state));
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(state));
+    return true;
+  } catch (err) {
+    throw new Error('Не вдалося зберегти дані у браузері: '
+      + 'сховище переповнене. Зробіть резервну копію і видаліть старі подання.');
+  }
 }
 
 function nowText() {
@@ -40,6 +76,14 @@ function nowText() {
     + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
+function todayIso() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/* ---------- номери ---------- */
+
 function nextNumber(state) {
   const year = new Date().getFullYear();
   const seq = state.submissions
@@ -48,130 +92,520 @@ function nextNumber(state) {
   return `${year}-${String(seq + 1).padStart(4, '0')}`;
 }
 
-async function sha256Hex(buffer) {
-  if (window.crypto && window.crypto.subtle) {
-    const digest = await window.crypto.subtle.digest('SHA-256', buffer);
-    return Array.from(new Uint8Array(digest))
-      .map((b) => b.toString(16).padStart(2, '0')).join('');
-  }
-  // Без WebCrypto (не захищений контекст): грубий, але стабільний відбиток.
-  let h1 = 0x811c9dc5;
-  let h2 = 0x01000193;
-  const bytes = new Uint8Array(buffer);
-  for (let i = 0; i < bytes.length; i++) {
-    h1 = ((h1 ^ bytes[i]) * 0x01000193) >>> 0;
-    h2 = ((h2 + bytes[i]) * 0x85ebca6b) >>> 0;
-  }
-  return (h1.toString(16) + h2.toString(16)).padStart(16, '0').repeat(4);
+function nextDocNumber(state, kind) {
+  const prefix = kind === 'cert' ? 'ДВ' : 'ЗВ';
+  const year = new Date().getFullYear();
+  const count = (state.events || []).filter(
+    (e) => e.type === `doc:${kind}` && e.year === year).length;
+  return `${prefix}-${year}-${String(count + 1).padStart(3, '0')}`;
 }
 
-function addEvent(state, submissionId, from, to, note) {
+/* ---------- журнал ---------- */
+
+function logEvent(state, type, payload, details) {
   state.events.push({
-    submissionId,
     at: nowText(),
-    fromStatus: from,
-    toStatus: to,
-    note: note || '',
+    type,
+    payload: payload || {},
+    details: details || '',
+    year: new Date().getFullYear(),
   });
+  if (state.events.length > 800) state.events = state.events.slice(-600);
 }
 
-function setStatus(state, submissionId, status, note) {
-  const sub = state.submissions.find((s) => s.id === submissionId);
-  if (!sub || sub.status === status) return;
-  const from = sub.status;
-  sub.status = status;
-  addEvent(state, submissionId, from, status, note);
+/* ---------- подання ---------- */
+
+function findSubmission(state, unit, dayIso) {
+  return state.submissions.find((s) => s.unit === unit && s.dayIso === dayIso);
 }
 
-function registerSubmission(state, file, unit, snapshot, result) {
-  const id = (state.submissions.reduce((max, s) => Math.max(max, s.id), 0) || 0) + 1;
-  const duplicate = state.submissions.find((s) => s.sha256 === file.sha256);
-  const sub = {
-    id,
-    number: nextNumber(state),
-    unit,
+function findSubmissionById(state, id) {
+  return state.submissions.find((s) => s.id === id);
+}
+
+function activeVersion(submission) {
+  if (!submission || !submission.versions || !submission.versions.length) return null;
+  return submission.versions[submission.versions.length - 1];
+}
+
+/**
+ * Реєструє файл: створює подання ПУ+доба або нову версію.
+ * Результат evaluate() вже обчислено.
+ */
+function registerSubmission(state, file, result, options) {
+  const opts = options || {};
+  const dayIso = result.header.dayIso;
+  const unit = result.header.sender || opts.unit || 'Без ПУ';
+
+  let submission = findSubmission(state, unit, dayIso);
+  if (!submission) {
+    const id = (state.submissions.reduce((max, s) => Math.max(max, s.id), 0) || 0) + 1;
+    submission = {
+      id,
+      number: nextNumber(state),
+      unit,
+      dayIso,
+      day: result.header.day,
+      status: 'new',
+      comment: '',
+      versions: [],
+      createdAt: nowText(),
+    };
+    state.submissions.push(submission);
+    logEvent(state, 'submission', { id, number: submission.number },
+      `Подання ${unit} за ${result.header.day}`);
+  }
+
+  const prevVersion = activeVersion(submission);
+  if (prevVersion && prevVersion.status === 'accepted') {
+    prevVersion.status = 'replaced';
+    logEvent(state, 'version:replaced', { id: submission.id }, 'Попередня версія замінена');
+  }
+
+  const duplicate = state.submissions
+    .flatMap((s) => s.versions.map((v) => ({ ...v, submissionId: s.id })))
+    .find((v) => v.sha256 === file.sha256 && !(prevVersion && v.id === prevVersion.id));
+
+  const version = {
+    id: (submission.versions.reduce((max, v) => Math.max(max, v.number), 0) || 0) + 1,
+    number: (submission.versions.reduce((max, v) => Math.max(max, v.number), 0) || 0) + 1,
     filename: file.filename,
     sizeBytes: file.size,
     sha256: file.sha256,
-    receivedAt: file.receivedAt || nowText(),
+    receivedAt: opts.receivedAt || nowText(),
     uploadedAt: nowText(),
     status: 'checked',
-    comment: '',
-    duplicateOf: duplicate ? duplicate.id : null,
     verdict: result.verdict,
     counts: result.counts,
     findings: result.findings,
+    header: result.header,
+    records: result.records,
+    dictionaries: result.dictionaries,
+    templateVersion: opts.templateVersion || '',
+    duplicateOf: duplicate ? { submissionId: duplicate.submissionId, version: duplicate.number } : null,
     checkedAt: nowText(),
-    templateVersion: snapshot.templateVersion,
-    sheets: snapshot.sheets,
   };
-  state.submissions.push(sub);
-  addEvent(state, id, null, 'new', 'Подання зареєстровано');
-  addEvent(state, id, 'new', 'checking', 'Розпочато автоматичну перевірку');
-  addEvent(state, id, 'checking', 'checked', 'Автоматична перевірка завершена');
-  return sub;
+
+  submission.versions.push(version);
+  submission.status = 'checked';
+  logEvent(state, 'version', { id: submission.id, version: version.number },
+    `Версія ${version.number}: ${VERDICT_LABEL[result.verdict] || result.verdict}`);
+  return { submission, version };
 }
 
-function historyOf(state, submissionId) {
-  return state.events.filter((e) => e.submissionId === submissionId);
-}
+function setStatus(state, submissionId, status, note) {
+  const submission = findSubmissionById(state, submissionId);
+  if (!submission) throw new Error('Подання не знайдено');
+  const version = activeVersion(submission);
+  const previous = submission.status;
 
-function dashboardOf(state) {
-  const byStatus = {};
-  for (const s of state.submissions) {
-    byStatus[s.status] = (byStatus[s.status] || 0) + 1;
+  if (version) {
+    version.status = status;
+    version.decidedAt = nowText();
+    if (note) version.comment = note;
   }
-  const recent = state.events.slice(-12).reverse().map((ev) => {
-    const sub = state.submissions.find((s) => s.id === ev.submissionId);
+  submission.status = status;
+  if (note) submission.comment = note;
+
+  if (status === 'accepted' || status === 'accepted_notes') {
+    addPersonsFromVersion(state, submission, version);
+  }
+  logEvent(state, 'decision', { id: submissionId, status },
+    `Статус: ${STATUS_LABELS[status] || status}` + (note ? ` — ${note}` : ''));
+  return previous;
+}
+
+/* ---------- реєстр осіб ---------- */
+
+function addPersonsFromVersion(state, submission, version) {
+  if (!version) return;
+  for (const rec of version.records || []) {
+    const key = rec.personKey;
+    if (!key) continue;
+    let person = state.persons.find((p) => p.key === key);
+    if (!person) {
+      person = {
+        id: (state.persons.reduce((max, p) => Math.max(max, p.id), 0) || 0) + 1,
+        key,
+        name: rec.name,
+        rank: rec.rank,
+        position: rec.position,
+        vch: rec.vch,
+        unit: submission.unit,
+        firstSeen: version.uploadedAt,
+        lastSeen: version.uploadedAt,
+        active: true,
+      };
+      state.persons.push(person);
+      logEvent(state, 'person:new', { id: person.id }, 'Нова особа в реєстрі');
+    } else {
+      person.rank = rec.rank || person.rank;
+      person.position = rec.position || person.position;
+      person.vch = rec.vch || person.vch;
+      person.lastSeen = version.uploadedAt;
+      person.active = true;
+    }
+  }
+}
+
+function personKeyOf(name) {
+  return personKey(name);
+}
+
+function resolveAlias(state, fromKey, toPersonId, comment) {
+  const toPerson = state.persons.find((p) => p.id === toPersonId);
+  if (!toPerson) throw new Error('Особу не знайдено');
+  state.aliases.push({
+    key: fromKey,
+    personId: toPersonId,
+    comment: comment || '',
+    at: nowText(),
+  });
+  logEvent(state, 'person:alias', { id: toPersonId }, 'Підтверджено написання ПІБ');
+}
+
+function aliasTarget(state, key) {
+  const alias = state.aliases.find((a) => a.key === key);
+  if (!alias) return null;
+  return state.persons.find((p) => p.id === alias.personId) || null;
+}
+
+/* Підозрілі збіги: у прийнятих поданнях є ключ, якого немає в реєстрі,
+   але який близький до наявної особи. */
+function suspiciousNames(state, template) {
+  const threshold = Number((template && template.params
+    && template.params.name_similarity_distance) || 2);
+  const known = new Set(state.persons.map((p) => p.key));
+  const seen = new Map();
+
+  for (const sub of state.submissions) {
+    const version = activeVersion(sub);
+    if (!version || (version.status !== 'accepted'
+      && version.status !== 'accepted_notes')) continue;
+    for (const rec of version.records || []) {
+      if (!rec.personKey || known.has(rec.personKey)) continue;
+      if (state.aliases.some((a) => a.key === rec.personKey)) continue;
+      if (!seen.has(rec.personKey)) {
+        seen.set(rec.personKey, { key: rec.personKey, name: rec.name, unit: sub.unit,
+          submissionId: sub.id, day: sub.dayIso, count: 0 });
+      }
+      seen.get(rec.personKey).count += 1;
+    }
+  }
+
+  const out = [];
+  for (const item of seen.values()) {
+    let best = null;
+    let bestDistance = Infinity;
+    for (const person of state.persons) {
+      const distance = levenshtein(item.key, person.key);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = person;
+      }
+    }
+    if (best && bestDistance > 0 && bestDistance <= threshold) {
+      out.push({ ...item, similarTo: best.name, personId: best.id, distance: bestDistance });
+    }
+  }
+  return out;
+}
+
+/* ---------- календар і довідки ---------- */
+
+function monthKey(iso) {
+  return iso ? iso.slice(0, 7) : '';
+}
+
+function monthDays(year, month) {
+  const last = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return Array.from({ length: last }, (_, i) => {
+    const d = String(i + 1).padStart(2, '0');
+    return { iso: `${year}-${String(month).padStart(2, '0')}-${d}`, day: i + 1 };
+  });
+}
+
+function units(state) {
+  return Array.from(new Set(state.submissions.map((s) => s.unit))).sort();
+}
+
+function isSkipped(state, unit, dayIso) {
+  return state.skips.some((s) => s.unit === unit && s.day === dayIso);
+}
+
+function skipDay(state, unit, dayIso, comment) {
+  if (isSkipped(state, unit, dayIso)) return;
+  state.skips.push({ unit, day: dayIso, comment: comment || '', at: nowText() });
+  logEvent(state, 'skip', {}, `Позначено «не очікується»: ${unit}, ${dayIso}`);
+}
+
+function unskipDay(state, unit, dayIso) {
+  state.skips = state.skips.filter((s) => !(s.unit === unit && s.day === dayIso));
+}
+
+function calendar(state, year, month) {
+  const days = monthDays(year, month);
+  const list = units(state);
+  return {
+    days,
+    units: list,
+    cells: list.map((unit) => days.map(({ iso }) => {
+      const sub = findSubmission(state, unit, iso);
+      if (sub) {
+        return { status: sub.status, submissionId: sub.id, number: sub.number };
+      }
+      if (isSkipped(state, unit, iso)) return { status: 'skipped' };
+      return { status: 'missing' };
+    })),
+  };
+}
+
+function acceptedVersionFor(state, unit, dayIso) {
+  const sub = findSubmission(state, unit, dayIso);
+  if (!sub) return null;
+  const version = activeVersion(sub);
+  if (!version) return null;
+  if (version.status !== 'accepted' && version.status !== 'accepted_notes') return null;
+  return { submission: sub, version };
+}
+
+/* Проблеми перед формуванням довідки. */
+function certificateIssues(state, year, month) {
+  const days = monthDays(year, month);
+  const list = units(state);
+  const missing = [];
+  const pending = [];
+  const conflicts = [];
+  const incomplete = [];
+
+  for (const unit of list) {
+    for (const { iso } of days) {
+      const sub = findSubmission(state, unit, iso);
+      if (!sub) {
+        if (!isSkipped(state, unit, iso)) missing.push({ unit, day: iso });
+        continue;
+      }
+      const version = activeVersion(sub);
+      if (!version) continue;
+      if (version.status === 'new' || version.status === 'checking'
+        || version.status === 'checked' || version.status === 'rework') {
+        pending.push({ unit, day: iso, status: version.status,
+          label: STATUS_SHORT[version.status] || version.status });
+      }
+      if (version.status === 'accepted' || version.status === 'accepted_notes') {
+        for (const rec of version.records || []) {
+          if (!rec.rank || !rec.vch) {
+            incomplete.push({ unit, day: iso, name: rec.name, row: rec.row });
+          }
+        }
+      }
+    }
+  }
+
+  const byPerson = new Map();
+  for (const unit of list) {
+    for (const { iso } of days) {
+      const hit = acceptedVersionFor(state, unit, iso);
+      if (!hit) continue;
+      for (const rec of hit.version.records || []) {
+        const bucket = byPerson.get(rec.personKey) || [];
+        bucket.push({ unit, day: iso, name: rec.name });
+        byPerson.set(rec.personKey, bucket);
+      }
+    }
+  }
+  for (const [key, entries] of byPerson) {
+    const dayMap = new Map();
+    for (const entry of entries) {
+      const list2 = dayMap.get(entry.day) || [];
+      list2.push(entry);
+      dayMap.set(entry.day, list2);
+    }
+    for (const [day, group] of dayMap) {
+      const distinctUnits = new Set(group.map((g) => g.unit));
+      if (distinctUnits.size > 1) {
+        conflicts.push({ personKey: key, name: group[0].name, day,
+          units: Array.from(distinctUnits) });
+      }
+    }
+  }
+
+  const suspicious = suspiciousNames(state, state._template);
+  return { missing, pending, conflicts, incomplete, suspicious };
+}
+
+/* Будує довідки про чергування за місяць по кожному ПУ. */
+function buildCertificates(state, year, month, options) {
+  const opts = options || {};
+  const days = monthDays(year, month);
+  const list = units(state);
+  const aliasMap = new Map();
+  for (const alias of state.aliases) {
+    const person = state.persons.find((p) => p.id === alias.personId);
+    if (person) aliasMap.set(alias.key, person);
+  }
+
+  const certificates = [];
+  for (const unit of list) {
+    const persons = new Map();
+    for (const { iso, day } of days) {
+      const hit = acceptedVersionFor(state, unit, iso);
+      if (!hit) continue;
+      for (const rec of hit.version.records || []) {
+        const person = aliasMap.get(rec.personKey)
+          || state.persons.find((p) => p.key === rec.personKey)
+          || { name: rec.name, rank: rec.rank, position: rec.position, vch: rec.vch };
+        const key = person.key || rec.personKey;
+        if (!persons.has(key)) {
+          persons.set(key, {
+            key,
+            name: person.name || rec.name,
+            rank: rec.rank,
+            position: rec.position,
+            vch: rec.vch,
+            days: [],
+            lastDay: iso,
+          });
+        }
+        const entry = persons.get(key);
+        entry.days.push(day);
+        entry.rank = rec.rank || entry.rank;
+        entry.position = rec.position || entry.position;
+        entry.vch = rec.vch || entry.vch;
+        entry.lastDay = iso;
+      }
+    }
+
+    if (!persons.size) continue;
+    const rows = Array.from(persons.values())
+      .sort((a, b) => a.name.localeCompare(b.name, 'uk'));
+    const skipped = days.filter(({ iso }) => !acceptedVersionFor(state, unit, iso)
+      && isSkipped(state, unit, iso)).map(({ day }) => day);
+    const missingDays = days.filter(({ iso }) => !acceptedVersionFor(state, unit, iso)
+      && !isSkipped(state, unit, iso)).map(({ day }) => day);
+
+    certificates.push({
+      unit,
+      month: `${year}-${String(month).padStart(2, '0')}`,
+      rows,
+      skipped,
+      missingDays,
+      totalPersons: rows.length,
+      totalDays: rows.reduce((sum, r) => sum + r.days.length, 0),
+      generatedAt: nowText(),
+      version: (opts.version || 1),
+      number: opts.number || '',
+      confirmed: Boolean(opts.confirmed),
+      comment: opts.comment || '',
+    });
+  }
+  return certificates;
+}
+
+/* ---------- зведення за добу ---------- */
+
+function daySummary(state, dayIso) {
+  const rows = [];
+  const conflicts = [];
+  for (const sub of state.submissions) {
+    if (sub.dayIso !== dayIso) continue;
+    const version = activeVersion(sub);
+    if (!version) continue;
+    const accepted = version.status === 'accepted' || version.status === 'accepted_notes';
+    for (const rec of version.records || []) {
+      rows.push({
+        unit: sub.unit,
+        group: rec.group,
+        type: rec.groupType || '—',
+        rank: rec.rank,
+        name: rec.name,
+        position: rec.position,
+        vch: rec.vch,
+        accepted,
+        status: version.status,
+      });
+    }
+  }
+
+  const byName = new Map();
+  for (const row of rows) {
+    const key = personKey(row.name);
+    const bucket = byName.get(key) || [];
+    bucket.push(row);
+    byName.set(key, bucket);
+  }
+  for (const [key, bucket] of byName) {
+    const distinct = new Set(bucket.map((b) => b.unit));
+    if (distinct.size > 1) {
+      conflicts.push({ name: bucket[0].name, units: Array.from(distinct) });
+    }
+  }
+
+  const byType = {};
+  for (const row of rows) {
+    byType[row.type] = (byType[row.type] || 0) + 1;
+  }
+
+  return { rows, conflicts, byType, total: rows.length };
+}
+
+/* ---------- головна панель ---------- */
+
+function dashboardOf(state, dayIso) {
+  const day = dayIso || todayIso();
+  const list = units(state);
+  const unitsStatus = list.map((unit) => {
+    const sub = findSubmission(state, unit, day);
+    if (!sub) {
+      return { unit, status: isSkipped(state, unit, day) ? 'skipped' : 'expected',
+        label: isSkipped(state, unit, day) ? 'Не очікується' : 'Очікується' };
+    }
+    const version = activeVersion(sub);
     return {
-      ...ev,
-      number: sub ? sub.number : '—',
-      unit: sub ? sub.unit : '—',
-      statusLabel: STATUS_LABELS[ev.toStatus] || ev.toStatus,
+      unit,
+      status: version ? version.status : 'new',
+      label: STATUS_SHORT[version ? version.status : 'new'],
+      number: sub.number,
+      submissionId: sub.id,
+      findings: version ? version.counts : null,
     };
   });
-  return {
-    total: state.submissions.length,
-    units: new Set(state.submissions.map((s) => s.unit)).size,
-    new: byStatus.new || 0,
-    checking: byStatus.checking || 0,
-    checked: byStatus.checked || 0,
-    accepted: byStatus.accepted || 0,
-    rework: byStatus.rework || 0,
-    rejected: byStatus.rejected || 0,
-    recent,
-  };
-}
 
-/* Текстовий зліпок вмісту: дозволяє перевірити файл повторно,
-   коли оригіналу вже немає (браузер не може зберегти сам XLSX). */
-function snapshotOf(workbook, templateVersion) {
-  return {
-    templateVersion,
-    sheets: workbook.map((sheet) => ({
-      name: sheet.name,
-      rows: sheet.rows.map((row) => row.map((cell) => {
-        if (cell instanceof Date) return cell.toISOString();
-        if (cell === null || cell === undefined) return null;
-        if (typeof cell === 'number' || typeof cell === 'boolean') return cell;
-        return String(cell);
-      })),
-    })),
-  };
-}
+  const statusCounts = {};
+  for (const sub of state.submissions) {
+    const version = activeVersion(sub);
+    if (!version) continue;
+    statusCounts[version.status] = (statusCounts[version.status] || 0) + 1;
+  }
 
-function restoreWorkbook(snapshot) {
-  return snapshot.sheets.map((sheet) => ({
-    name: sheet.name,
-    rows: sheet.rows.map((row) => row.map((cell) => {
-      if (typeof cell === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(cell)) {
-        const d = new Date(cell);
-        if (!Number.isNaN(d.getTime())) return d;
-      }
-      return cell;
-    })),
+  const personsToday = state.submissions
+    .filter((s) => s.dayIso === day)
+    .reduce((sum, s) => {
+      const v = activeVersion(s);
+      if (!v || (v.status !== 'accepted' && v.status !== 'accepted_notes')) return sum;
+      return sum + (v.records || []).length;
+    }, 0);
+
+  const recent = state.events.slice(-12).reverse().map((ev) => ({
+    at: ev.at,
+    text: ev.details || ev.type,
+    type: ev.type,
   }));
+
+  return {
+    day,
+    unitsStatus,
+    expected: unitsStatus.filter((u) => u.status === 'expected').length,
+    received: unitsStatus.filter((u) => u.status !== 'expected').length,
+    statusCounts,
+    personsToday,
+    recent,
+    total: state.submissions.length,
+    persons: state.persons.length,
+  };
 }
+
+/* ---------- резервні копії ---------- */
 
 function dumpState() {
   return JSON.stringify(loadState(), null, 2);
@@ -184,16 +618,15 @@ function importState(text) {
   }
   saveState({
     submissions: data.submissions,
+    persons: data.persons || [],
+    aliases: data.aliases || [],
+    months: data.months || {},
+    skips: data.skips || [],
     events: data.events || [],
-    counter: data.counter || data.submissions.length,
   });
 }
 
-function clearState() {
-  localStorage.removeItem(STORE_KEY);
-}
-
-/* ---------- експорт XLSX (без бібліотек) ---------- */
+/* ---------- експорт XLSX ---------- */
 
 function xmlEscape(text) {
   return String(text).replace(/[&<>"']/g, (ch) => ({
@@ -221,7 +654,6 @@ function sheetXml(rows) {
   return parts.join('');
 }
 
-/* Мінімальний ZIP без стискання (method 0) — читається Excel і LibreOffice. */
 function buildZip(files) {
   const encoder = new TextEncoder();
   const chunks = [];
@@ -252,7 +684,6 @@ function buildZip(files) {
     lv.setUint16(26, nameBytes.length, true);
     lv.setUint16(28, 0, true);
     local.set(nameBytes, 30);
-
     chunks.push(local, data);
 
     const header = new Uint8Array(46 + nameBytes.length);
@@ -271,7 +702,6 @@ function buildZip(files) {
     cv.setUint32(42, offset, true);
     header.set(nameBytes, 46);
     central.push(header);
-
     offset += local.length + data.length;
   }
 
@@ -349,4 +779,20 @@ function downloadBlob(bytes, filename, type) {
   link.click();
   document.body.removeChild(link);
   setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+async function sha256Hex(buffer) {
+  if (window.crypto && window.crypto.subtle) {
+    const digest = await window.crypto.subtle.digest('SHA-256', buffer);
+    return Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < bytes.length; i++) {
+    h1 = ((h1 ^ bytes[i]) * 0x01000193) >>> 0;
+    h2 = ((h2 + bytes[i]) * 0x85ebca6b) >>> 0;
+  }
+  return (h1.toString(16) + h2.toString(16)).padStart(16, '0').repeat(4);
 }

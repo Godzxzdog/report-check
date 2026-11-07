@@ -1,117 +1,65 @@
 {
-  "version": "1.0",
-  "title": "Приклад затвердженого шаблону звіту підрозділу",
-  "note": "Замініть цей файл на опис реального шаблону. Усі правила перевірки виводяться звідси.",
-  "sheets": [
-    {
-      "name": "Звіт",
-      "required": true,
-      "header_row": 1,
-      "data_start_row": 2,
-      "columns": [
-        {
-          "name": "Підрозділ",
-          "key": "unit",
-          "type": "text",
-          "required": true,
-          "max_length": 120
-        },
-        {
-          "name": "Дата",
-          "key": "date",
-          "type": "date",
-          "required": true,
-          "format": "DD.MM.YYYY"
-        },
-        {
-          "name": "Кількість",
-          "key": "qty",
-          "type": "number",
-          "required": true,
-          "min": 0
-        },
-        {
-          "name": "Виконано",
-          "key": "done",
-          "type": "number",
-          "required": true,
-          "min": 0
-        },
-        {
-          "name": "Відсоток",
-          "key": "pct",
-          "type": "number",
-          "required": false,
-          "min": 0,
-          "max": 100
-        },
-        {
-          "name": "Примітка",
-          "key": "note",
-          "type": "text",
-          "required": false,
-          "max_length": 300
-        }
-      ],
-      "unique_by": [
-        "unit",
-        "date"
-      ],
-      "totals": [
-        {
-          "id": "done_le_qty",
-          "description": "Виконано не може перевищувати кількість",
-          "left": {
-            "column": "done",
-            "agg": "sum"
-          },
-          "op": "<=",
-          "right": {
-            "column": "qty",
-            "agg": "sum"
-          }
-        },
-        {
-          "id": "pct_plausible",
-          "description": "Середній відсоток має бути в межах 0–100",
-          "left": {
-            "column": "pct",
-            "agg": "avg"
-          },
-          "op": ">=",
-          "right": {
-            "value": 0
-          }
-        }
-      ],
-      "row_checks": [
-        {
-          "id": "row_pct_le_100",
-          "description": "Відсоток у рядку не може бути більшим за 100",
-          "when": {
-            "column": "pct",
-            "is": "filled"
-          },
-          "assert": {
-            "column": "pct",
-            "op": "<=",
-            "value": 100
-          }
-        },
-        {
-          "id": "row_done_le_qty",
-          "description": "Виконано в рядку не може перевищувати кількість",
-          "when": {
-            "column": "qty",
-            "is": "filled"
-          },
-          "assert": {
-            "column": "done",
-            "op": "<=",
-            "column_ref": "qty"
-          }
-        }
-      ]
-    }
-  ]
+  "version": "1.3",
+  "rules_version": "4.1",
+  "title": "Щоденний розрахунок особового складу",
+  "note": "Опис шаблону v1.3. Дані читаються лише з аркуша «Розрахунок» за іменованими клітинками шапки й фіксованими колонками таблиці.",
+
+  "sheet": "Розрахунок",
+  "reference_sheet": "Довідники",
+
+  "header": {
+    "cells": {
+      "f_version": "D3",
+      "f_sender": "D4",
+      "f_day": "D5",
+      "f_period_from": "D6",
+      "f_period_to": "D7",
+      "f_resp_rank": "D8",
+      "f_resp_name": "D9"
+    },
+    "required": ["f_sender", "f_day", "f_resp_rank", "f_resp_name"],
+    "supported_versions": ["1.3"]
+  },
+
+  "table": {
+    "header_row": 11,
+    "data_start_row": 12,
+    "data_end_row": 311,
+    "columns": [
+      { "letter": "A", "key": "n", "name": "№ з/п", "auto": true },
+      { "letter": "B", "key": "vch", "name": "в/ч", "required": true },
+      { "letter": "C", "key": "group", "name": "Група", "required": true },
+      { "letter": "D", "key": "group_type", "name": "Тип групи (авто)", "auto": true },
+      { "letter": "E", "key": "position", "name": "Посада", "required": true },
+      { "letter": "F", "key": "rank", "name": "Військове звання", "required": true },
+      { "letter": "G", "key": "name", "name": "Прізвище, ім'я, по батькові", "required": true },
+      { "letter": "H", "key": "note", "name": "Примітка" },
+      { "letter": "I", "key": "control", "name": "Контроль", "auto": true, "ignored": true }
+    ]
+  },
+
+  "dictionaries": {
+    "source": "reference_sheet",
+    "columns": {
+      "group": "A",
+      "group_type": "B",
+      "vch": "C",
+      "position": "D",
+      "rank": "E",
+      "unit": "F"
+    },
+    "start_row": 2,
+    "end_row": 200
+  },
+
+  "params": {
+    "day_start_hour": 9,
+    "horizon_past_days": 7,
+    "horizon_future_days": 1,
+    "headcount_change_percent": 40,
+    "name_similarity_distance": 2,
+    "max_size_mb": 10
+  },
+
+  "period_rule": "доба належить до місяця дати початку (f_day)"
 }

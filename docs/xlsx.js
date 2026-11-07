@@ -146,7 +146,7 @@ function nodeText(node) {
   if (node.mode === 'dom') return node.textContent;
   const out = [];
   const walk = (n) => {
-    if (typeof n.text === 'string') out.push(n.text);
+    if (n.text) out.push(n.text);
     for (const child of n.children || []) walk(child);
   };
   walk(node.doc);
@@ -158,8 +158,12 @@ function parseTree(text) {
   const root = { local: '#root', attrs: {}, children: [], text: '' };
   const stack = [root];
   let i = 0;
-  const decode = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+  const decode = (s) => s
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number(dec)))
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
 
   while (i < text.length) {
     const lt = text.indexOf('<', i);
@@ -299,6 +303,24 @@ function readWorkbookSheets(doc) {
   }));
 }
 
+/* Іменовані клітинки книги: f_sender -> {sheet, row, col} */
+function readDefinedNames(doc) {
+  const names = new Map();
+  for (const node of tags(doc, 'definedName')) {
+    const name = attr(node, 'name');
+    if (!name || name.startsWith('_xlnm')) continue;
+    const target = (nodeText(node) || '').trim();
+    const m = /^(?:'([^']+)'|([^!]+))!\$?([A-Z]+)\$?(\d+)$/.exec(target);
+    if (!m) continue;
+    names.set(name, {
+      sheet: m[1] || m[2],
+      col: colToIndex(m[3]),
+      row: Number(m[4]) - 1,
+    });
+  }
+  return names;
+}
+
 function readRels(doc) {
   const map = new Map();
   if (!doc) return map;
@@ -344,7 +366,34 @@ async function readWorkbook(arrayBuffer) {
   if (!sheets.length) {
     throw new XlsxError('У файлі немає жодного аркуша з даними');
   }
-  return sheets;
+  const entryNames = Array.from(zip.entries.keys());
+  return {
+    sheets,
+    names: readDefinedNames(wbDoc),
+    meta: {
+      macros: entryNames.some((n) => /vbaProject\.bin$/i.test(n)),
+      hasComments: entryNames.some((n) => n.startsWith('xl/comments')),
+      sheetNames: sheets.map((s) => s.name),
+    },
+  };
+}
+
+/* Значення клітинки за адресою з іменованої клітинки. */
+function cellValue(workbook, sheetName, row, col) {
+  const wanted = String(sheetName).trim().toLowerCase();
+  const sheet = workbook.sheets.find(
+    (s) => s.name.trim().toLowerCase() === wanted);
+  if (!sheet) return null;
+  const data = sheet.rows[row];
+  if (!data) return null;
+  const value = data[col];
+  return value === undefined ? null : value;
+}
+
+function namedValue(workbook, name) {
+  const ref = workbook.names.get(name);
+  if (!ref) return null;
+  return cellValue(workbook, ref.sheet, ref.row, ref.col);
 }
 
 function readSheet(doc, shared, styles) {
