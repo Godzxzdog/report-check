@@ -329,7 +329,7 @@ function readStyleDates(doc) {
 function readWorkbookSheets(doc) {
   return tags(doc, 'sheet').map((sheet, i) => ({
     name: attr(sheet, 'name') || `Аркуш${i + 1}`,
-    rid: attr(sheet, 'id') || '',
+    rid: attr(sheet, 'id') || attr(sheet, 'r:id') || '',
   }));
 }
 
@@ -355,7 +355,9 @@ function readRels(doc) {
   const map = new Map();
   if (!doc) return map;
   for (const rel of tags(doc, 'Relationship')) {
-    map.set(attr(rel, 'Id'), attr(rel, 'Target'));
+    const id = attr(rel, 'Id') || attr(rel, 'id');
+    const target = attr(rel, 'Target') || attr(rel, 'target');
+    if (id && target) map.set(id, target);
   }
   return map;
 }
@@ -382,13 +384,26 @@ async function readWorkbook(arrayBuffer) {
   const stylesXml = await textOf(zip, 'xl/styles.xml');
   const styles = readStyleDates(stylesXml ? parseXml(stylesXml) : null);
 
+  const names = readWorkbookSheets(wbDoc);
   const sheets = [];
-  for (const sheet of readWorkbookSheets(wbDoc)) {
+  for (let i = 0; i < names.length; i++) {
+    const sheet = names[i];
+    const candidates = [];
     let target = rels.get(sheet.rid) || '';
-    if (!target) continue;
-    target = target.replace(/^\.?\//, '');
-    if (!target.startsWith('xl/')) target = 'xl/' + target;
-    const xml = await textOf(zip, target);
+    if (target) {
+      target = target.replace(/^\.?\//, '');
+      if (!target.startsWith('xl/')) target = 'xl/' + target;
+      candidates.push(target);
+    }
+    /* Резерв: типові місця аркушів, якщо звʼязки не прочитались. */
+    candidates.push(`xl/worksheets/sheet${i + 1}.xml`);
+    candidates.push(`xl/worksheets/sheet${sheet.name.replace(/[^\w]/g, '')}.xml`);
+
+    let xml = null;
+    for (const path of candidates) {
+      xml = await textOf(zip, path);
+      if (xml !== null) break;
+    }
     if (xml === null) continue;
     sheets.push({ name: sheet.name, rows: readSheet(parseXml(xml), shared, styles) });
   }
