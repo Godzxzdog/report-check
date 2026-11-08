@@ -104,24 +104,35 @@ const HAS_DOMPARSER = typeof DOMParser !== 'undefined';
 
 function parseXml(text) {
   if (HAS_DOMPARSER) {
-    const doc = new DOMParser().parseFromString(text, 'application/xml');
-    if (doc.querySelector('parsererror')) {
-      throw new XlsxError('Файл пошкоджений: не вдалося прочитати вміст');
+    let doc = null;
+    try {
+      doc = new DOMParser().parseFromString(text, 'application/xml');
+    } catch (err) {
+      doc = null;
     }
-    return { mode: 'dom', doc };
+    if (doc) {
+      const broken = typeof doc.querySelector === 'function'
+        && doc.querySelector('parsererror');
+      if (!broken) return { mode: 'dom', doc };
+    }
+    /* Браузер не дав документ — розбираємо власним парсером. */
   }
   return { mode: 'tree', doc: parseTree(text) };
 }
 
 /* Локальні назви без простору імен: робота з будь-яким префіксом. */
 function tags(node, name) {
+  if (!node || !node.doc) return [];
   if (node.mode === 'dom') {
-    return Array.from(node.doc.getElementsByTagName('*'))
-      .filter((n) => n.localName === name);
+    const all = node.doc.getElementsByTagName('*');
+    if (!all) return [];
+    return Array.from(all).filter((n) => n && nodeNameOf(n) === name);
   }
   const out = [];
   const walk = (n) => {
-    for (const child of n.children || []) {
+    const kids = (n && n.children) || [];
+    for (const child of kids) {
+      if (!child) continue;
       if (child.local === name) out.push({ mode: 'tree', doc: child });
       walk(child);
     }
@@ -130,10 +141,22 @@ function tags(node, name) {
   return out;
 }
 
+/* Локальна назва вузла DOM: localName, інакше nodeName без префікса. */
+function nodeNameOf(n) {
+  if (n.localName) return n.localName;
+  const raw = n.nodeName || '';
+  return raw.includes(':') ? raw.split(':').pop() : raw;
+}
+
 function attr(node, name) {
+  if (!node) return null;
   if (node.mode === 'dom') {
-    for (const a of Array.from(node.attributes || [])) {
-      if (a.localName === name) return a.value;
+    const doc = node.doc;
+    if (!doc) return null;
+    const list = doc.attributes;
+    if (!list) return null;
+    for (const a of Array.from(list)) {
+      if (a && nodeNameOf(a) === name) return a.value;
     }
     return null;
   }
@@ -143,11 +166,18 @@ function attr(node, name) {
 }
 
 function nodeText(node) {
-  if (node.mode === 'dom') return node.textContent;
+  if (!node) return '';
+  if (node.mode === 'dom') {
+    const doc = node.doc;
+    if (!doc) return '';
+    return doc.textContent === undefined ? '' : String(doc.textContent);
+  }
   const out = [];
   const walk = (n) => {
+    if (!n) return;
     if (n.text) out.push(n.text);
-    for (const child of n.children || []) walk(child);
+    const kids = n.children || [];
+    for (const child of kids) walk(child);
   };
   walk(node.doc);
   return out.join('');
