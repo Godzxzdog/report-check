@@ -105,22 +105,73 @@ function asText(value) {
 
 /* ---------- дати ---------- */
 
+const MONTHS_UK = {
+  січня: 1, лютого: 2, березня: 3, квітня: 4, травня: 5, червня: 6,
+  липня: 7, серпня: 8, вересня: 9, жовтня: 10, листопада: 11, грудня: 12,
+};
+
+/* Складає дату й перевіряє, що вона існує (без 31.02). */
+function makeDate(y, mo, d) {
+  if (!(y > 1900 && y < 2200) || !(mo >= 1 && mo <= 12) || !(d >= 1 && d <= 31)) {
+    return null;
+  }
+  const date = new Date(Date.UTC(y, mo - 1, d));
+  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== mo - 1
+    || date.getUTCDate() !== d) return null;
+  return date;
+}
+
+/**
+ * Дата з будь-якого подання:
+ * Date, число Excel, «05.11.2026», «5.11.26», «05/11/2026»,
+ * «2026-11-05», «5 листопада 2026», ISO з часом.
+ */
 function parseDate(value) {
+  if (value === null || value === undefined || value === '') return null;
+
   if (value instanceof Date) {
-    return Number.isNaN(value.getTime()) ? null : value;
+    if (Number.isNaN(value.getTime())) return null;
+    return makeDate(value.getUTCFullYear(), value.getUTCMonth() + 1,
+      value.getUTCDate());
   }
-  if (typeof value === 'number' && value > 1 && value < 60000) {
-    return serialToDate(value);
+
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value <= 0) return null;
+    if (value < 1 || value > 200000) return null;
+    const d = serialToDate(value);
+    if (Number.isNaN(d.getTime())) return null;
+    return makeDate(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
   }
-  if (typeof value === 'string') {
-    const m = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(value.trim());
-    if (!m) return null;
-    const [, d, mo, y] = m.map(Number);
-    const date = new Date(Date.UTC(y, mo - 1, d));
-    if (date.getUTCFullYear() !== y || date.getUTCMonth() !== mo - 1
-      || date.getUTCDate() !== d) return null;
-    return date;
+
+  if (typeof value !== 'string') return null;
+  const text = value.trim().replace(/\s+/g, ' ');
+  if (!text) return null;
+
+  /* 05.11.2026 · 5.11.26 · 05/11/2026 · 5-11-2026 */
+  let m = /^(\d{1,2})[./-](\d{1,2})[./-](\d{4}|\d{2})$/.exec(text);
+  if (m) {
+    const d = Number(m[1]);
+    const mo = Number(m[2]);
+    let y = Number(m[3]);
+    if (y < 100) y += 2000;
+    return makeDate(y, mo, d);
   }
+
+  /* 2026-11-05 · 2026-11-05T00:00:00 */
+  m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ].*)?$/.exec(text);
+  if (m) return makeDate(Number(m[1]), Number(m[2]), Number(m[3]));
+
+  /* 5 листопада 2026 · 5 листопада 2026 р. */
+  m = /^(\d{1,2})\s+([а-яіїєґ']+)\s+(\d{4})/i.exec(text);
+  if (m) {
+    const mo = MONTHS_UK[m[2].toLowerCase()];
+    if (mo) return makeDate(Number(m[3]), mo, Number(m[1]));
+  }
+
+  /* 05.11.2026 12:30 (дата з часом) */
+  m = /^(\d{1,2})[./-](\d{1,2})[./-](\d{4})\s+\d{1,2}:\d{2}/.exec(text);
+  if (m) return makeDate(Number(m[3]), Number(m[2]), Number(m[1]));
+
   return null;
 }
 

@@ -287,10 +287,16 @@ function isDateFormat(code) {
 }
 
 /* Серійне число Excel -> дата (система 1900, з відомим зсувом 1900-02-29). */
+/**
+ * Номер дати Excel -> Date.
+ * У 1900-системі Excel помилково має 29.02.1900, тому все, що більше
+ * за 60, зсунуте на день уперед. 1904-система (Mac) починається з 01.01.1904.
+ */
 function serialToDate(serial) {
   const days = Math.floor(serial);
   const ms = Math.round((serial - days) * 86400) * 1000;
-  const base = Date.UTC(1899, 11, 30);
+  if (days <= 0) return new Date(NaN);
+  const base = days < 61 ? Date.UTC(1899, 11, 31) : Date.UTC(1899, 11, 30);
   return new Date(base + days * 86400000 + ms);
 }
 
