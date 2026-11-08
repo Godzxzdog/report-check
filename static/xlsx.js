@@ -99,8 +99,9 @@ function textOf(zip, name) {
 
 /* ---------- XML ---------- */
 
-/* DOMParser, якщо він є (браузер) — швидший і надійніший. */
-const HAS_DOMPARSER = typeof DOMParser !== 'undefined';
+/* DOMParser у браузерах губить атрибути з префіксами (r:id) і поводиться
+   по-різному між рушіями, тому завжди використовуємо власний парсер. */
+const HAS_DOMPARSER = false;
 
 function parseXml(text) {
   if (HAS_DOMPARSER) {
@@ -156,7 +157,11 @@ function attr(node, name) {
     const list = doc.attributes;
     if (!list) return null;
     for (const a of Array.from(list)) {
-      if (a && nodeNameOf(a) === name) return a.value;
+      if (!a) continue;
+      const local = a.localName || '';
+      const full = a.name || a.nodeName || '';
+      if (local === name || full === name
+        || full.split(':').pop() === name) return a.value;
     }
     return null;
   }
