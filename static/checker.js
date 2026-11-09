@@ -6,7 +6,7 @@
    Кожна знахідка має клітинку у форматі «Розрахунок!G17». */
 
 const SEVERITY_ORDER = { critical: 0, error: 1, warning: 2, info: 3 };
-const SEVERITY_LABEL = {
+var SEVERITY_LABEL = {
   critical: 'Критична',
   error: 'Помилка',
   warning: 'Попередження',
