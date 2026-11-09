@@ -1,19 +1,15 @@
 'use strict';
 
-/* Приймання щоденних розрахунків — клієнтська логіка.
-   Усе працює у браузері: XLSX читається локально, реєстр у localStorage. */
+/* app.js — екран перевірки. Дані не зберігаються:
+   завантажив файл → перевірив → скачав оновлений файл. */
 
 const state = {
-  tab: 'day',
-  day: todayIso(),
   template: null,
-  files: [],
-  current: null,
-  register: { q: '', status: '', order: 'number', dir: 'desc' },
-  personQuery: '',
-  calMonth: '',
+  busy: false,
+  /** файл-база, який користувач завантажив (у пам'яті лише на час сесії) */
+  base: null,       // { workbook, summary, fileName, sheets }
+  pending: [],      // файли, що чекають підтвердження перезапису
   certMonth: '',
-  certDraft: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -30,7 +26,7 @@ function toast(message, kind) {
   box.textContent = message;
   box.className = 'toast show' + (kind ? ' ' + kind : '');
   clearTimeout(toast._timer);
-  toast._timer = setTimeout(() => { box.className = 'toast'; }, 5200);
+  toast._timer = setTimeout(() => { box.className = 'toast'; }, 6000);
 }
 
 function fmtDay(iso) {
@@ -39,1166 +35,512 @@ function fmtDay(iso) {
   return `${d}.${m}.${y}`;
 }
 
-function fmtStamp(text) {
-  if (!text) return '—';
-  const [date, time] = String(text).split(' ');
-  return `${fmtDay(date)}${time ? ' ' + time.slice(0, 5) : ''}`;
+function sha256Hex(buffer) {
+  return crypto.subtle.digest('SHA-256', buffer).then((digest) =>
+    Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join(''));
 }
 
-function shiftDay(iso, delta) {
-  const date = new Date(iso + 'T00:00:00Z');
-  date.setUTCDate(date.getUTCDate() + delta);
-  return date.toISOString().slice(0, 10);
-}
-
-function monthLabel(key) {
-  if (!key) return '—';
-  const [y, m] = key.split('-');
-  const names = ['січня', 'лютого', 'березня', 'квітня', 'травня', 'червня',
-    'липня', 'серпня', 'вересня', 'жовтня', 'листопада', 'грудня'];
-  return `${names[Number(m) - 1] || m} ${y}`;
-}
-
-/* ---------- перемикання вкладок ---------- */
-
-function setTab(tab) {
-  state.tab = tab;
-  document.querySelectorAll('.tab').forEach((node) => {
-    node.classList.toggle('active', node.dataset.tab === tab);
-  });
-  document.querySelectorAll('.view').forEach((node) => {
-    node.classList.toggle('active', node.id === `view-${tab}`);
-  });
-  renderTab();
-}
-
-function renderTab() {
-  try {
-    if (state.tab === 'day') renderDay();
-    else if (state.tab === 'register') renderRegister();
-    else if (state.tab === 'calendar') renderCalendar();
-    else if (state.tab === 'persons') renderPersons();
-    else if (state.tab === 'certs') renderCerts();
-  } catch (err) {
-    toast(err.message, 'error');
-    console.error(err);
-  }
-}
-
-function refresh() {
-  renderTab();
-}
-
-/* ---------- вкладка «Доба» ---------- */
-
-function renderDay() {
-  const data = loadState();
-  data._template = state.template;
-  const dash = dashboardOf(data, state.day);
-
-  $('day-picker').value = state.day;
-  $('day-label').textContent = fmtDay(state.day);
-
-  const setStat = (key, value) => {
-    const node = document.querySelector(`#day-stats [data-k="${key}"]`);
-    if (node) node.textContent = value ?? 0;
-  };
-  setStat('expected', dash.expected);
-  setStat('received', dash.received);
-  setStat('accepted', dash.unitsStatus.filter(
-    (u) => u.status === 'accepted' || u.status === 'accepted_notes').length);
-  setStat('rework', dash.unitsStatus.filter((u) => u.status === 'rework').length);
-  setStat('persons', dash.personsToday);
-
-  const grid = $('units-status');
-  grid.innerHTML = '';
-  if (!dash.unitsStatus.length) {
-    grid.appendChild(el('p', 'empty',
-      'Ще немає подань. Натисніть «Завантажити» і виберіть файли розрахунків.'));
-  }
-  for (const unit of dash.unitsStatus) {
-    const card = el('div', 'unit-card unit-' + unit.status);
-    const head = el('div', 'unit-head');
-    head.appendChild(el('span', 'unit-name', unit.unit));
-    head.appendChild(el('span', 'status status-' + unit.status, unit.label));
-    card.appendChild(head);
-
-    if (unit.number) {
-      card.appendChild(el('div', 'unit-meta', `Подання № ${unit.number}`));
-    }
-    if (unit.findings) {
-      const meta = el('div', 'unit-meta');
-      const c = unit.findings;
-      if (c.critical) meta.appendChild(el('span', 'chip chip-critical', `критичних ${c.critical}`));
-      if (c.error) meta.appendChild(el('span', 'chip chip-error', `помилок ${c.error}`));
-      if (c.warning) meta.appendChild(el('span', 'chip chip-warning', `попереджень ${c.warning}`));
-      if (!c.critical && !c.error && !c.warning) {
-        meta.appendChild(el('span', 'chip chip-ok', 'без зауважень'));
-      }
-      card.appendChild(meta);
-    }
-
-    if (unit.status === 'expected') {
-      const actions = el('div', 'unit-actions');
-      const skip = el('button', 'btn btn-ghost btn-xs', 'Не очікується');
-      skip.addEventListener('click', () => {
-        const db = loadState();
-        skipDay(db, unit.unit, state.day, '');
-        saveState(db);
-        toast('Позначено: подання не очікується');
-        refresh();
-      });
-      actions.appendChild(skip);
-      card.appendChild(actions);
-    }
-
-    if (unit.submissionId) {
-      card.addEventListener('click', () => openDrawer(unit.submissionId));
-      card.classList.add('clickable');
-    }
-    grid.appendChild(card);
-  }
-
-  const list = $('day-timeline');
-  list.innerHTML = '';
-  if (!dash.recent.length) {
-    list.appendChild(el('li', 'empty', 'Поки що немає операцій'));
-  }
-  for (const ev of dash.recent) {
-    const item = el('li');
-    item.appendChild(el('span', 'tl-time', fmtStamp(ev.at)));
-    item.appendChild(el('span', '', ev.text));
-    list.appendChild(item);
-  }
-}
-
-/* ---------- вкладка «Реєстр» ---------- */
-
-function versionCounts(sub) {
-  const v = activeVersion(sub);
-  return v ? v.counts : null;
-}
-
-function renderRegister() {
-  const data = loadState();
-  let rows = [];
-  for (const sub of data.submissions) {
-    const version = activeVersion(sub);
-    rows.push({
-      id: sub.id,
-      number: sub.number,
-      unit: sub.unit,
-      dayIso: sub.dayIso,
-      day: sub.day,
-      status: sub.status,
-      statusLabel: STATUS_SHORT[sub.status] || sub.status,
-      versions: sub.versions.length,
-      version,
-      filename: version ? version.filename : '—',
-      counts: version ? version.counts : null,
-      verdict: version ? version.verdict : '',
-      errors: version && version.counts ? version.counts.error + version.counts.critical : 0,
-    });
-  }
-
-  if (state.register.status) {
-    rows = rows.filter((r) => r.status === state.register.status);
-  }
-  const q = state.register.q.toLowerCase();
-  if (q) {
-    rows = rows.filter((r) => [r.unit, r.number, r.filename]
-      .join(' ').toLowerCase().includes(q));
-  }
-
-  const dir = state.register.dir === 'asc' ? 1 : -1;
-  rows.sort((a, b) => {
-    const key = state.register.order;
-    if (key === 'errors') return ((a.errors || 0) - (b.errors || 0)) * dir;
-    const va = a[key] ?? '';
-    const vb = b[key] ?? '';
-    return String(va).localeCompare(String(vb), 'uk') * dir;
-  });
-
-  const body = $('reg-body');
-  body.innerHTML = '';
-  if (!rows.length) {
-    const tr = el('tr');
-    const td = el('td', 'empty', 'Немає подань за цим фільтром');
-    td.colSpan = 8;
-    tr.appendChild(td);
-    body.appendChild(tr);
-    return;
-  }
-
-  for (const row of rows) {
-    const tr = el('tr', 'row');
-    tr.appendChild(el('td', 'mono', row.number));
-    tr.appendChild(el('td', '', row.unit));
-    tr.appendChild(el('td', 'nowrap', fmtDay(row.dayIso)));
-    tr.appendChild(el('td', 'mono', `v${row.versions}`));
-    tr.appendChild(el('td', 'filename', row.filename));
-
-    const sum = el('td', 'summary');
-    if (row.verdict) sum.appendChild(el('span', 'dot dot-' + row.verdict));
-    const c = row.counts;
-    sum.appendChild(document.createTextNode(
-      !c ? 'не перевірено'
-        : c.critical ? `критичних: ${c.critical}`
-          : c.error ? `помилок: ${c.error}`
-            : c.warning ? `попереджень: ${c.warning}` : 'без зауважень'));
-    tr.appendChild(sum);
-
-    const st = el('td');
-    st.appendChild(el('span', 'status status-' + row.status, row.statusLabel));
-    tr.appendChild(st);
-
-    const act = el('td', 'actions');
-    const open = el('button', 'btn btn-ghost btn-xs', 'Відкрити');
-    open.addEventListener('click', (e) => { e.stopPropagation(); openDrawer(row.id); });
-    act.appendChild(open);
-    tr.appendChild(act);
-
-    tr.addEventListener('click', () => openDrawer(row.id));
-    body.appendChild(tr);
-  }
-}
-
-/* ---------- вкладка «Календар» ---------- */
-
-function renderCalendar() {
-  const data = loadState();
-  if (!state.calMonth) state.calMonth = state.day.slice(0, 7);
-  $('cal-month').value = state.calMonth;
-  const [year, month] = state.calMonth.split('-').map(Number);
-  const table = $('cal-table');
-  table.innerHTML = '';
-
-  const cal = calendar(data, year, month);
-  if (!cal.units.length) {
-    table.appendChild(el('caption', 'empty', 'Ще немає подань за цей місяць'));
-    return;
-  }
-
-  const thead = el('thead');
-  const headRow = el('tr');
-  headRow.appendChild(el('th', 'cal-unit', 'ПУ'));
-  for (const day of cal.days) headRow.appendChild(el('th', 'cal-day', String(day.day)));
-  thead.appendChild(headRow);
-  table.appendChild(thead);
-
-  const tbody = el('tbody');
-  cal.units.forEach((unit, ui) => {
-    const tr = el('tr');
-    tr.appendChild(el('td', 'cal-unit', unit));
-    cal.days.forEach((day, di) => {
-      const cell = cal.cells[ui][di];
-      const td = el('td', 'cal-cell cal-' + cell.status);
-      td.title = `${unit}, ${fmtDay(day.iso)}: `
-        + (cell.status === 'missing' ? 'немає подання'
-          : cell.status === 'skipped' ? 'подання не очікується'
-            : STATUS_SHORT[cell.status] || cell.status);
-      if (cell.submissionId) {
-        td.classList.add('clickable');
-        td.textContent = cell.status === 'accepted' || cell.status === 'accepted_notes'
-          ? '✓' : '•';
-        td.addEventListener('click', () => openDrawer(cell.submissionId));
-      } else if (cell.status === 'skipped') {
-        td.textContent = '—';
-        td.addEventListener('click', () => {
-          const db = loadState();
-          unskipDay(db, unit, day.iso);
-          saveState(db);
-          toast('Позначку «не очікується» знято');
-          refresh();
-        });
-      } else {
-        td.textContent = '';
-        td.addEventListener('click', () => {
-          const comment = window.prompt(
-            `Позначити ${fmtDay(day.iso)} для «${unit}» як «подання не очікується»? `
-            + 'Коментар:', '') ;
-          if (comment === null) return;
-          const db = loadState();
-          skipDay(db, unit, day.iso, comment);
-          saveState(db);
-          toast('Позначено');
-          refresh();
-        });
-      }
-      tr.appendChild(td);
-    });
-    tbody.appendChild(tr);
-  });
-  table.appendChild(tbody);
-}
-
-/* ---------- вкладка «Особи» ---------- */
-
-function renderPersons() {
-  const data = loadState();
-  data._template = state.template;
-  const suspicious = suspiciousNames(data, state.template);
-
-  const box = $('suspicious-list');
-  box.innerHTML = '';
-  if (!suspicious.length) {
-    box.appendChild(el('p', 'ok-line', 'Нерозвʼязаних збігів немає'));
-  } else {
-    const table = el('table', 'register');
-    const thead = el('thead');
-    const hr = el('tr');
-    for (const h of ['У поданні', 'У реєстрі', 'Різниця', 'Діб', 'Дії']) {
-      hr.appendChild(el('th', '', h));
-    }
-    thead.appendChild(hr);
-    table.appendChild(thead);
-    const tbody = el('tbody');
-    for (const item of suspicious) {
-      const tr = el('tr');
-      tr.appendChild(el('td', '', item.name));
-      tr.appendChild(el('td', '', item.similarTo));
-      tr.appendChild(el('td', 'mono', String(item.distance)));
-      tr.appendChild(el('td', 'mono', String(item.count)));
-      const actions = el('td', 'actions');
-      const same = el('button', 'btn btn-ghost btn-xs', 'Це та сама особа');
-      same.addEventListener('click', () => {
-        const db = loadState();
-        resolveAlias(db, item.key, item.personId, 'Підтверджено перевіряючим');
-        saveState(db);
-        toast('Написання ПІБ обʼєднано з особою');
-        refresh();
-      });
-      const other = el('button', 'btn btn-ghost btn-xs', 'Різні особи');
-      other.addEventListener('click', () => {
-        const db = loadState();
-        const person = db.persons.find((p) => p.id === item.personId);
-        // створюємо окрему особу, щоб більше не пропонувало
-        db.persons.push({
-          id: (db.persons.reduce((max, p) => Math.max(max, p.id), 0) || 0) + 1,
-          key: item.key,
-          name: item.name,
-          rank: '',
-          position: '',
-          vch: '',
-          unit: '',
-          firstSeen: nowText(),
-          lastSeen: nowText(),
-          active: true,
-          distinctFrom: person ? person.id : null,
-        });
-        saveState(db);
-        toast('Додано як окрему особу');
-        refresh();
-      });
-      actions.appendChild(same);
-      actions.appendChild(other);
-      tr.appendChild(actions);
-      tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-    box.appendChild(table);
-  }
-
-  const q = state.personQuery.toLowerCase();
-  const persons = data.persons
-    .filter((p) => !q || p.name.toLowerCase().includes(q))
-    .sort((a, b) => a.name.localeCompare(b.name, 'uk'));
-
-  const body = $('persons-body');
-  body.innerHTML = '';
-  if (!persons.length) {
-    const tr = el('tr');
-    const td = el('td', 'empty', data.persons.length
-      ? 'Нічого не знайдено' : 'Реєстр порожній — особи додаються після приймання подань');
-    td.colSpan = 7;
-    tr.appendChild(td);
-    body.appendChild(tr);
-    return;
-  }
-
-  for (const person of persons) {
-    const days = new Set();
-    for (const sub of data.submissions) {
-      const version = activeVersion(sub);
-      if (!version) continue;
-      if (version.status !== 'accepted' && version.status !== 'accepted_notes') continue;
-      if ((version.records || []).some((r) => r.personKey === person.key)) {
-        days.add(sub.dayIso);
-      }
-    }
-    const tr = el('tr');
-    tr.appendChild(el('td', '', person.name));
-    tr.appendChild(el('td', '', person.rank || '—'));
-    tr.appendChild(el('td', '', person.position || '—'));
-    tr.appendChild(el('td', 'mono', person.vch || '—'));
-    tr.appendChild(el('td', '', person.unit || '—'));
-    tr.appendChild(el('td', 'mono', String(days.size)));
-    body.appendChild(tr);
-  }
-}
-
-/* ---------- вкладка «Довідки» ---------- */
-
-function renderCerts() {
-  const data = loadState();
-  data._template = state.template;
-  if (!state.certMonth) state.certMonth = state.day.slice(0, 7);
-  $('cert-month').value = state.certMonth;
-
-  const [year, month] = state.certMonth.split('-').map(Number);
-  const issues = certificateIssues(data, year, month);
-  state.certIssues = issues;
-
-  const box = $('cert-issues');
-  box.innerHTML = '';
-
-  const block = (title, items, render, severity) => {
-    if (!items.length) return;
-    const panel = el('div', 'issue-block issue-' + severity);
-    const head = el('div', 'issue-head');
-    head.appendChild(el('strong', '', title));
-    head.appendChild(el('span', 'issue-count', String(items.length)));
-    panel.appendChild(head);
-    const list = el('ul', 'issue-list');
-    for (const item of items.slice(0, 40)) {
-      list.appendChild(el('li', '', render(item)));
-    }
-    if (items.length > 40) {
-      list.appendChild(el('li', 'hint', `…та ще ${items.length - 40}`));
-    }
-    panel.appendChild(list);
-    box.appendChild(panel);
-  };
-
-  block('Доби без прийнятого подання', issues.missing,
-    (i) => `${i.unit} · ${fmtDay(i.day)}`, 'warning');
-  block('Подання не завершені', issues.pending,
-    (i) => `${i.unit} · ${fmtDay(i.day)} · ${i.label}`, 'warning');
-  block('Нерозвʼязані збіги ПІБ', issues.suspicious,
-    (i) => `${i.name} ≈ ${i.similarTo} (${i.distance})`, 'warning');
-  block('Особа в двох ПУ за одну добу', issues.conflicts,
-    (i) => `${i.name} · ${fmtDay(i.day)}: ${i.units.join(', ')}`, 'critical');
-  block('Особи без звання або в/ч', issues.incomplete,
-    (i) => `${i.unit} · ${fmtDay(i.day)} · ${i.name} (рядок ${i.row})`, 'critical');
-
-  const results = $('cert-results');
-  results.innerHTML = '';
-  if (!state.certDraft) return;
-
-  for (const cert of state.certDraft) {
-    const panel = el('div', 'cert-card');
-    const head = el('div', 'cert-head');
-    head.appendChild(el('h3', '', `Довідка · ${cert.unit}`));
-    head.appendChild(el('span', 'cert-meta',
-      `${monthLabel(cert.month)} · осіб ${cert.totalPersons} · діб ${cert.totalDays}`));
-    panel.appendChild(head);
-
-    const table = el('table', 'register');
-    const thead = el('thead');
-    const hr = el('tr');
-    for (const h of ['№', 'Звання', 'ПІБ', 'Посада', 'в/ч', 'Діб', 'Дати']) {
-      hr.appendChild(el('th', '', h));
-    }
-    thead.appendChild(hr);
-    table.appendChild(thead);
-    const tbody = el('tbody');
-    cert.rows.forEach((row, i) => {
-      const tr = el('tr');
-      tr.appendChild(el('td', 'mono', String(i + 1)));
-      tr.appendChild(el('td', '', row.rank || '—'));
-      tr.appendChild(el('td', '', row.name));
-      tr.appendChild(el('td', '', row.position || '—'));
-      tr.appendChild(el('td', 'mono', row.vch || '—'));
-      tr.appendChild(el('td', 'mono', String(row.days.length)));
-      tr.appendChild(el('td', 'hint', row.days.join(', ')));
-      tbody.appendChild(tr);
-    });
-    table.appendChild(tbody);
-    panel.appendChild(table);
-
-    if (cert.skipped.length) {
-      panel.appendChild(el('p', 'hint',
-        `Позначено «не очікується»: ${cert.skipped.join(', ')}`));
-    }
-
-    const actions = el('div', 'cert-actions');
-    const exp = el('button', 'btn btn-ghost btn-sm', 'Експорт XLSX');
-    exp.addEventListener('click', () => exportCertificate(cert));
-    actions.appendChild(exp);
-    panel.appendChild(actions);
-
-    results.appendChild(panel);
-  }
-}
-
-function buildCertificates() {
-  const data = loadState();
-  data._template = state.template;
-  const [year, month] = state.certMonth.split('-').map(Number);
-  const issues = certificateIssues(data, year, month);
-
-  const blocking = issues.conflicts.length + issues.incomplete.length;
-  if (blocking) {
-    toast('Є конфлікти або незаповнені дані — виправте їх перед формуванням',
-      'error');
-    return;
-  }
-
-  const open = issues.missing.length + issues.pending.length + issues.suspicious.length;
-  let comment = '';
-  if (open) {
-    const answer = window.prompt(
-      `Відкритих пунктів: ${open}.\n`
-      + 'Вони не блокують довідку, але її потрібно підтвердити.\n'
-      + 'Впишіть коментар, щоб сформувати довідку:', '');
-    if (answer === null || !answer.trim()) {
-      toast('Формування скасовано — потрібен коментар', 'error');
-      return;
-    }
-    comment = answer.trim();
-  }
-
-  const version = (data.months[state.certMonth] || 0) + 1;
-  state.certDraft = buildCertificates(data, year, month, {
-    version, confirmed: Boolean(open), comment,
-  });
-  data.months[state.certMonth] = version;
-  logEvent(data, 'month:cert', {}, `Сформовано довідки за ${state.certMonth}, версія ${version}`);
-  saveState(data);
-  toast(`Довідки сформовано (версія ${version})`);
-  renderCerts();
-}
-
-function exportCertificate(cert) {
-  const rows = [
-    [`Довідка про чергування. ${cert.unit}`],
-    [`Період: ${monthLabel(cert.month)}`],
-    [`Сформовано: ${fmtStamp(cert.generatedAt)}`],
-    [],
-    ['№', 'Звання', 'ПІБ', 'Посада', 'в/ч', 'Кількість діб', 'Дати'],
-  ];
-  cert.rows.forEach((row, i) => {
-    rows.push([i + 1, row.rank, row.name, row.position, row.vch,
-      row.days.length, row.days.join(', ')]);
-  });
-  rows.push([]);
-  rows.push(['Усього осіб', cert.totalPersons]);
-  rows.push(['Усього діб', cert.totalDays]);
-  if (cert.skipped.length) rows.push(['Не очікувалось', cert.skipped.join(', ')]);
-
-  const safeUnit = cert.unit.replace(/[^\wа-яіїєґ ]/gi, '').trim().replace(/\s+/g, '_');
-  downloadBlob(buildXlsx([{ name: 'Довідка', rows }]),
-    `Довідка_${safeUnit}_${cert.month.replace('-', '')}.xlsx`);
-  toast('Довідку експортовано', 'ok');
-}
-
-/* ---------- зведення за добу ---------- */
-
-function exportDaySummary() {
-  const data = loadState();
-  const summary = daySummary(data, state.day);
-
-  const order = [
-    ['для наказу', [
-      ['ПУ', 'Група', 'Тип', 'Звання', 'ПІБ', 'Посада', 'в/ч'],
-      ...summary.rows.filter((r) => r.accepted)
-        .sort((a, b) => a.unit.localeCompare(b.unit, 'uk')
-          || a.group.localeCompare(b.group, 'uk'))
-        .map((r) => [r.unit, r.group, r.type, r.rank, r.name, r.position, r.vch]),
-    ]],
-    ['для виплат', [
-      ['№', 'ПІБ', 'Звання', 'Посада', 'в/ч', 'ПУ', 'Група'],
-      ...summary.rows.filter((r) => r.accepted)
-        .map((r, i) => [i + 1, r.name, r.rank, r.position, r.vch, r.unit, r.group]),
-    ]],
-    ['підсумки', [
-      ['Тип групи', 'Кількість'],
-      ...Object.entries(summary.byType).map(([k, v]) => [k, v]),
-      [],
-      ['Усього', summary.total],
-    ]],
-  ];
-
-  const sheets = order.map(([name, rows]) => ({ name, rows }));
-  if (summary.conflicts.length) {
-    sheets.push({
-      name: 'конфлікти',
-      rows: [['ПІБ', 'ПУ'], ...summary.conflicts.map((c) => [c.name, c.units.join(', ')])],
-    });
-  }
-
-  downloadBlob(buildXlsx(sheets), `Зведення_${state.day.replace(/-/g, '')}.xlsx`);
-  toast('Зведення експортовано', 'ok');
-}
-
-/* ---------- деталі подання ---------- */
-
-function openDrawer(id) {
-  const data = loadState();
-  data._template = state.template;
-  const sub = findSubmissionById(data, id);
-  if (!sub) { toast('Подання не знайдено', 'error'); return; }
-  state.current = sub;
-
-  $('drawer-title').textContent = `Подання № ${sub.number}`;
-  $('drawer-sub').textContent = `${sub.unit} · доба ${fmtDay(sub.dayIso)} · `
-    + `версій: ${sub.versions.length}`;
-
-  const body = $('drawer-body');
-  body.innerHTML = '';
-
-  const version = activeVersion(sub);
-  const st = el('div', 'drawer-status');
-  st.appendChild(el('span', 'status status-' + sub.status,
-    STATUS_SHORT[sub.status] || sub.status));
-  if (version) {
-    st.appendChild(el('span', 'verdict verdict-' + version.verdict,
-      VERDICT_LABEL[version.verdict] || version.verdict));
-  }
-  if (version && version.duplicateOf) {
-    st.appendChild(el('span', 'note-warn',
-      `Той самий файл уже є в поданні №${version.duplicateOf.submissionId}`));
-  }
-  body.appendChild(st);
-
-  if (!version) {
-    body.appendChild(el('p', 'empty', 'Ще не перевірено'));
-  } else {
-    const meta = el('dl', 'meta');
-    const pairs = [
-      ['Файл', version.filename],
-      ['Розмір', (version.sizeBytes / 1024).toFixed(1) + ' КБ'],
-      ['Отримано', fmtStamp(version.receivedAt)],
-      ['Завантажено', fmtStamp(version.uploadedAt)],
-      ['Контрольна сума', version.sha256.slice(0, 20) + '…'],
-      ['Відповідальна особа', `${version.header.respRank} ${version.header.respName}`],
-      ['Осіб у файлі', String((version.records || []).length)],
-    ];
-    for (const [label, value] of pairs) {
-      meta.appendChild(el('dt', '', label));
-      meta.appendChild(el('dd', '', String(value)));
-    }
-    body.appendChild(meta);
-
-    const counts = el('div', 'counts');
-    for (const sev of ['critical', 'error', 'warning', 'info']) {
-      const box = el('div', 'count count-' + sev);
-      box.appendChild(el('span', 'count-num', String(version.counts[sev] || 0)));
-      box.appendChild(el('span', 'count-label', SEVERITY_LABEL[sev]));
-      counts.appendChild(box);
-    }
-    body.appendChild(counts);
-
-    if (version.findings.length) {
-      const table = el('table', 'findings');
-      const thead = el('thead');
-      const hr = el('tr');
-      for (const h of ['Рівень', 'Код', 'Клітинка', 'Проблема', 'Рекомендація']) {
-        hr.appendChild(el('th', '', h));
-      }
-      thead.appendChild(hr);
-      table.appendChild(thead);
-      const tbody = el('tbody');
-      for (const f of version.findings) {
-        const tr = el('tr');
-        tr.appendChild(el('td', 'sev sev-' + f.severity,
-          SEVERITY_LABEL[f.severity] || f.severity));
-        tr.appendChild(el('td', 'mono', f.code));
-        tr.appendChild(el('td', 'mono cell', f.cell || '—'));
-        tr.appendChild(el('td', '', f.problem));
-        tr.appendChild(el('td', 'hint', f.recommendation || ''));
-        tbody.appendChild(tr);
-      }
-      table.appendChild(tbody);
-      body.appendChild(table);
-    } else {
-      body.appendChild(el('p', 'ok-line', 'Зауважень не виявлено'));
-    }
-  }
-
-  /* версії */
-  if (sub.versions.length > 1) {
-    body.appendChild(el('h4', '', 'Версії'));
-    const list = el('ul', 'history');
-    sub.versions.forEach((v) => {
-      const li = el('li');
-      li.appendChild(el('span', 'mono', `v${v.number}`));
-      li.appendChild(el('span', '', v.filename));
-      li.appendChild(el('span', 'tl-note', STATUS_SHORT[v.status] || v.status));
-      list.appendChild(li);
-    });
-    body.appendChild(list);
-  }
-
-  /* дії */
-  const actions = el('div', 'drawer-actions');
-  const canAccept = version && version.counts.critical === 0;
-
-  if (version) {
-    const accept = el('button', 'btn btn-primary', 'Прийняти');
-    accept.disabled = !canAccept;
-    accept.title = canAccept ? '' : 'Критичні помилки блокують приймання';
-    accept.addEventListener('click', () => decide(sub.id, 'accepted'));
-    actions.appendChild(accept);
-
-    if (version.counts.error > 0) {
-      const notes = el('button', 'btn btn-warn', 'Прийняти із зауваженнями');
-      notes.addEventListener('click', () => decide(sub.id, 'accepted_notes'));
-      actions.appendChild(notes);
-    }
-
-    const rework = el('button', 'btn btn-warn', 'На доопрацювання');
-    rework.addEventListener('click', () => decide(sub.id, 'rework'));
-    actions.appendChild(rework);
-
-    const reject = el('button', 'btn btn-danger', 'Відхилити');
-    reject.addEventListener('click', () => decide(sub.id, 'rejected'));
-    actions.appendChild(reject);
-
-    const copy = el('button', 'btn btn-ghost', 'Копія з помітками');
-    copy.addEventListener('click', () => markedCopy(sub, version));
-    actions.appendChild(copy);
-
-    const message = el('button', 'btn btn-ghost', 'Текст повідомлення');
-    message.addEventListener('click', () => feedbackText(sub, version));
-    actions.appendChild(message);
-  }
-  body.appendChild(actions);
-
-  if (sub.comment) {
-    body.appendChild(el('h4', '', 'Коментар перевіряючого'));
-    body.appendChild(el('p', 'comment', sub.comment));
-  }
-
-  $('drawer').classList.add('open');
-  $('backdrop').classList.add('show');
-  $('drawer').setAttribute('aria-hidden', 'false');
-}
-
-function decide(subId, status) {
-  const data = loadState();
-  const sub = findSubmissionById(data, subId);
-  const version = activeVersion(sub);
-  if (!version) return;
-
-  if (status === 'accepted' && version.counts.critical) {
-    toast('Приймання заблоковане: є критичні помилки', 'error');
-    return;
-  }
-
-  let note = '';
-  if (status === 'accepted_notes' || status === 'rework' || status === 'rejected') {
-    const prompt = status === 'accepted_notes'
-      ? 'Коментар до приймання із зауваженнями (обовʼязково):'
-      : 'Коментар для ПУ (необовʼязково):';
-    const answer = window.prompt(prompt, '');
-    if (answer === null) return;
-    if (status === 'accepted_notes' && !answer.trim()) {
-      toast('Для приймання із зауваженнями потрібен коментар', 'error');
-      return;
-    }
-    note = answer.trim();
-  }
-
-  setStatus(data, subId, status, note);
-  saveState(data);
-  toast(`Статус: ${STATUS_SHORT[status]}`);
-  refresh();
-  openDrawer(subId);
-}
-
-function closeDrawer() {
-  $('drawer').classList.remove('open');
-  $('backdrop').classList.remove('show');
-  $('drawer').setAttribute('aria-hidden', 'false');
-  $('drawer').setAttribute('aria-hidden', 'true');
-}
-
-/* ---------- зворотний звʼязок ---------- */
-
-function feedbackText(sub, version) {
-  const problems = version.findings.filter(
-    (f) => f.severity === 'critical' || f.severity === 'error');
-  const lines = [
-    `${sub.unit}, доба ${fmtDay(sub.dayIso)}.`,
-    `У розрахунку виявлено ${problems.length} зауважень. Виправте та надішліть файл `
-    + `повторно з новим номером версії.`,
-    '',
-  ];
-  problems.forEach((f, i) => {
-    lines.push(`${i + 1}. ${f.cell} — ${f.problem}`);
-    if (f.recommendation) lines.push(`   Рекомендація: ${f.recommendation}`);
-  });
-
-  const text = lines.join('\n');
-  if (navigator.clipboard) {
-    navigator.clipboard.writeText(text).then(
-      () => toast('Текст скопійовано в буфер обміну', 'ok'),
-      () => showTextModal('Текст повідомлення', text));
-  } else {
-    showTextModal('Текст повідомлення', text);
-  }
-}
-
-function showTextModal(title, text) {
-  window.prompt(title + ' (скопіюйте):', text);
-}
-
-/* Позначена копія: той самий шаблон, проблемні клітинки в примітці. */
-function markedCopy(sub, version) {
-  const rows = [
-    [`Копія з помітками. ${sub.unit}, доба ${fmtDay(sub.dayIso)}`],
-    ['Оригінал не змінено. Нижче — перелік зауважень із привʼязкою до клітинок.'],
-    [],
-    ['Рівень', 'Код', 'Клітинка', 'Проблема', 'Рекомендація'],
-  ];
-  for (const f of version.findings) {
-    rows.push([SEVERITY_LABEL[f.severity] || f.severity, f.code, f.cell || '',
-      f.problem, f.recommendation || '']);
-  }
-  rows.push([]);
-  rows.push(['Рядок', 'в/ч', 'Група', 'Посада', 'Звання', 'ПІБ', 'Проблеми']);
-  for (const rec of version.records || []) {
-    const own = version.findings.filter((f) => f.row === rec.row);
-    rows.push([rec.row, rec.vch, rec.group, rec.position, rec.rank, rec.name,
-      own.map((f) => f.code).join(', ')]);
-  }
-  const safeUnit = sub.unit.replace(/[^\wа-яіїєґ ]/gi, '').trim().replace(/\s+/g, '_');
-  downloadBlob(buildXlsx([{ name: 'Помітки', rows }]),
-    `Помітки_${safeUnit}_${sub.dayIso.replace(/-/g, '')}.xlsx`);
-  toast('Копію з помітками сформовано', 'ok');
-}
-
-/* ---------- завантаження ---------- */
-
-function openUpload() {
-  state.files = [];
-  $('upload-result').innerHTML = '';
-  renderFiles();
-  $('upload-modal').classList.add('open');
-  $('upload-modal').setAttribute('aria-hidden', 'false');
-}
-
-function closeUpload() {
-  $('upload-modal').classList.remove('open');
-  $('upload-modal').setAttribute('aria-hidden', 'true');
-}
-
-function renderFiles() {
-  const list = $('file-list');
-  list.innerHTML = '';
-  for (const file of state.files) {
-    const li = el('li');
-    li.appendChild(el('span', 'file-name', file.name));
-    li.appendChild(el('span', 'file-size', (file.size / 1024).toFixed(1) + ' КБ'));
-    list.appendChild(li);
-  }
-  $('upload-send').disabled = state.files.length === 0;
-}
-
-function addFiles(fileList) {
-  const maxSize = Number((state.template && state.template.params
-    && state.template.params.max_size_mb) || 10) * 1024 * 1024;
-  for (const file of fileList) {
-    const lower = file.name.toLowerCase();
-    if (lower.endsWith('.xlsm')) {
-      toast(`«${file.name}» містить макроси — не приймається`, 'error');
-      continue;
-    }
-    if (!lower.endsWith('.xlsx')) {
-      toast(`«${file.name}» не XLSX — пропущено`, 'error');
-      continue;
-    }
-    if (file.size > maxSize) {
-      toast(`«${file.name}» більший за ${maxSize / 1024 / 1024} МБ`, 'error');
-      continue;
-    }
-    if (state.files.some((f) => f.name === file.name && f.size === file.size)) continue;
-    state.files.push(file);
-  }
-  renderFiles();
-}
-
-async function sendFiles() {
-  if (!state.files.length) return;
-  const button = $('upload-send');
-  button.disabled = true;
-  button.textContent = 'Перевірка…';
-
-  const data = loadState();
-  data._template = state.template;
-  const tpl = state.template;
-  const results = [];
-
-  for (const file of state.files) {
-    try {
-      const buffer = await file.arrayBuffer();
-      const sha = await sha256Hex(buffer);
-      const workbook = await readWorkbook(buffer);
-
-      const registry = data.persons.map((p) => ({ key: p.key, name: p.name }));
-      const result = evaluate(workbook, tpl, {
-        filename: file.name,
-        registry,
-        today: new Date(),
-      });
-
-      if (!result.header.dayIso) {
-        results.push({ name: file.name, ok: false,
-          message: 'Не вдалося визначити добу зі шапки файлу' });
-        continue;
-      }
-
-      const prev = findSubmission(data, result.header.sender || 'Без ПУ',
-        result.header.dayIso);
-      if (prev) {
-        const prevVersion = activeVersion(prev);
-        if (prevVersion && prevVersion.sha256 === sha) {
-          results.push({ name: file.name, ok: false, duplicate: true,
-            message: `Той самий файл уже прийнято (подання №${prev.number})` });
-          continue;
-        }
-      }
-
-      const dup = data.submissions.flatMap((s) => s.versions || [])
-        .find((v) => v.sha256 === sha);
-      if (dup) {
-        results.push({ name: file.name, ok: false, duplicate: true,
-          message: 'Ідентичний файл уже є в системі — не додано' });
-        continue;
-      }
-
-      const { submission, version } = registerSubmission(data, {
-        filename: file.name, size: file.size, sha256: sha,
-      }, result, { templateVersion: tpl.version });
-
-      results.push({
-        name: file.name, ok: true,
-        number: submission.number,
-        unit: submission.unit,
-        day: submission.day,
-        version: version.number,
-        verdict: result.verdict,
-        counts: result.counts,
-      });
-    } catch (err) {
-      results.push({ name: file.name, ok: false, message: err.message });
-    }
-  }
-
-  try {
-    saveState(data);
-  } catch (err) {
-    toast(err.message, 'error');
-  }
-
-  const box = $('upload-result');
-  box.innerHTML = '';
-  const table = el('table', 'register compact');
-  const thead = el('thead');
-  const hr = el('tr');
-  for (const h of ['Файл', 'ПУ', 'Доба', 'Результат']) hr.appendChild(el('th', '', h));
-  thead.appendChild(hr);
-  table.appendChild(thead);
-  const tbody = el('tbody');
-  for (const item of results) {
-    const tr = el('tr');
-    tr.appendChild(el('td', 'filename', item.name));
-    tr.appendChild(el('td', '', item.ok ? item.unit : '—'));
-    tr.appendChild(el('td', 'nowrap', item.ok ? fmtDay(item.day) : '—'));
-    const status = el('td');
-    if (item.ok) {
-      status.appendChild(el('span', 'verdict verdict-' + item.verdict,
-        VERDICT_LABEL[item.verdict] || item.verdict));
-      status.appendChild(el('span', 'hint',
-        ` №${item.number} · v${item.version}`));
-    } else {
-      status.appendChild(el('span', 'hint', item.message));
-    }
-    tr.appendChild(status);
-    tbody.appendChild(tr);
-  }
-  table.appendChild(tbody);
-  box.appendChild(table);
-
-  const good = results.filter((r) => r.ok).length;
-  toast(`Опрацьовано ${results.length}: успішно ${good}`, good ? 'ok' : 'error');
-
-  button.disabled = false;
-  button.textContent = 'Перевірити й прийняти';
-  state.files = [];
-  renderFiles();
-  refresh();
-}
-
-/* ---------- експорт реєстру ---------- */
-
-function exportRegister() {
-  const data = loadState();
-  const rows = [['Номер', 'ПУ', 'Доба', 'Версія', 'Файл', 'Статус', 'Вердикт',
-    'Критичних', 'Помилок', 'Попереджень', 'Інформація', 'Осіб', 'Завантажено']];
-  for (const sub of data.submissions) {
-    const version = activeVersion(sub);
-    const c = version ? version.counts : {};
-    rows.push([sub.number, sub.unit, fmtDay(sub.dayIso),
-      version ? version.number : '',
-      version ? version.filename : '',
-      STATUS_SHORT[sub.status] || sub.status,
-      version ? VERDICT_LABEL[version.verdict] : '',
-      c.critical || 0, c.error || 0, c.warning || 0, c.info || 0,
-      version ? (version.records || []).length : 0,
-      version ? version.uploadedAt : '']);
-  }
-  downloadBlob(buildXlsx([{ name: 'Реєстр', rows }]),
-    `Реєстр_${todayIso().replace(/-/g, '')}.xlsx`);
-  toast('Реєстр експортовано', 'ok');
-}
-
-function exportPersons() {
-  const data = loadState();
-  const rows = [['ПІБ', 'Звання', 'Посада', 'в/ч', 'ПУ', 'Активна']];
-  for (const p of data.persons) {
-    rows.push([p.name, p.rank, p.position, p.vch, p.unit, p.active ? 'так' : 'ні']);
-  }
-  downloadBlob(buildXlsx([{ name: 'Особи', rows }]), 'Реєстр_осіб.xlsx');
-  toast('Реєстр осіб експортовано', 'ok');
-}
-
-/* ---------- резервні копії ---------- */
-
-function backup() {
-  const bytes = new TextEncoder().encode(dumpState());
-  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-  downloadBlob(bytes, `backup_${stamp}.json`, 'application/json');
-  toast('Резервну копію збережено', 'ok');
-}
-
-function restore(input) {
-  const file = input.files && input.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    try {
-      importState(String(reader.result));
-      toast('Дані відновлено', 'ok');
-      refresh();
-    } catch (err) {
-      toast('Не вдалося відновити: ' + err.message, 'error');
-    }
-  };
-  reader.readAsText(file);
-  input.value = '';
-}
-
-/* ---------- ініціалізація ---------- */
+/* ---------- шаблон ---------- */
 
 async function loadTemplate() {
-  const res = await fetch('rules/template.json');
+  const res = await fetch('rules/template.json', { cache: 'no-store' });
   if (!res.ok) throw new Error('Не вдалося завантажити опис шаблону');
   state.template = await res.json();
   $('template-line').textContent =
     `Шаблон v${state.template.version} · ТЗ v${state.template.rules_version}`;
-  return state.template;
 }
 
-function bind() {
-  document.querySelectorAll('.tab').forEach((tab) => {
-    tab.addEventListener('click', () => setTab(tab.dataset.tab));
+/* ---------- обробка файлу ---------- */
+
+/* Читає файл, перевіряє, повертає об'єкт для подальшого запису. */
+async function checkFile(file, base) {
+  const buffer = await file.arrayBuffer();
+  const sha = await sha256Hex(buffer);
+  const workbook = await readWorkbook(buffer);
+  const result = await evaluate(workbook, state.template, {
+    filename: file.name,
+    registry: [],
+    today: new Date(),
   });
 
-  $('day-prev').addEventListener('click', () => {
-    state.day = shiftDay(state.day, -1);
-    renderDay();
-  });
-  $('day-next').addEventListener('click', () => {
-    state.day = shiftDay(state.day, 1);
-    renderDay();
-  });
-  $('day-today').addEventListener('click', () => {
-    state.day = todayIso();
-    renderDay();
-  });
-  $('day-picker').addEventListener('change', (e) => {
-    state.day = e.target.value || todayIso();
-    renderDay();
-  });
-
-  $('btn-upload').addEventListener('click', openUpload);
-  $('upload-close').addEventListener('click', closeUpload);
-  $('upload-cancel').addEventListener('click', closeUpload);
-  $('upload-send').addEventListener('click', sendFiles);
-
-  $('drawer-close').addEventListener('click', closeDrawer);
-  $('backdrop').addEventListener('click', closeDrawer);
-
-  $('btn-backup').addEventListener('click', backup);
-  $('btn-restore').addEventListener('click', () => $('restore-input').click());
-  $('restore-input').addEventListener('change', (e) => restore(e.target));
-
-  $('reg-search').addEventListener('input', (e) => {
-    state.register.q = e.target.value.trim();
-    renderRegister();
-  });
-  const statusFilter = $('reg-status');
-  for (const [key, label] of Object.entries(STATUS_SHORT)) {
-    const opt = el('option', '', label);
-    opt.value = key;
-    statusFilter.appendChild(opt);
+  if (!result.header.dayIso) {
+    return { file, ok: false, message: 'Не вдалося визначити добу зі шапки файлу' };
   }
-  statusFilter.addEventListener('change', (e) => {
-    state.register.status = e.target.value;
-    renderRegister();
+
+  const unit = result.header.sender || 'Без ПУ';
+  const prev = findSummaryRow(base && base.summary, unit, result.header.dayIso);
+
+  return {
+    file, ok: true, sha, workbook, result, unit,
+    dayIso: result.header.dayIso,
+    prev,
+    sameFile: Boolean(prev && prev.sha256 && prev.sha256 === sha),
+  };
+}
+
+/* ---------- запис у базу ---------- */
+
+/* Додає/замінює рядок «Зведення» і повертає аркуші для нового файлу. */
+function mergeIntoBase(base, entry) {
+  const prev = entry.prev;
+  const version = prev ? (prev.version || 1) + 1 : 1;
+  const number = prev && prev.number ? prev.number : makeNumber(base, entry);
+
+  const row = summaryRowOf(entry.unit, entry.result, {
+    number,
+    version,
+    filename: entry.file.name,
+    sha256: entry.sha,
+    size: entry.file.size,
+    uploadedAt: dbStamp(),
+    replacedAt: prev ? dbStamp() : '',
+    status: 'Прийнято',
+    note: prev ? `замінено файл (v${prev.version})` : '',
   });
-  document.querySelectorAll('#view-register th[data-order]').forEach((th) => {
-    th.addEventListener('click', () => {
-      const key = th.dataset.order;
-      if (state.register.order === key) {
-        state.register.dir = state.register.dir === 'asc' ? 'desc' : 'asc';
-      } else {
-        state.register.order = key;
-        state.register.dir = 'desc';
-      }
-      renderRegister();
+
+  const asArray = SUMMARY_HEADER.map((h) => row[h] === undefined ? '' : row[h]);
+
+  const rows = base.summary && base.summary.rows ? base.summary.rows.slice() : [];
+  const index = rows.findIndex((r) => r.unit === entry.unit && r.dayIso === entry.dayIso);
+  if (index >= 0) {
+    rows[index] = Object.assign({}, prev, {
+      unit: entry.unit,
+      dayIso: entry.dayIso,
+      day: entry.result.header.day || entry.dayIso,
+      number,
+      version,
+      persons: (entry.result.records || []).length,
+      verdict: row['Вердикт'],
+      filename: entry.file.name,
+      sha256: entry.sha,
+      size: entry.file.size,
+      uploadedAt: row['Завантажено'],
+      replacedAt: row['Замінено'],
+      status: 'Прийнято',
+      note: row['Примітка'],
     });
-  });
-  $('reg-export').addEventListener('click', exportRegister);
+  } else {
+    rows.push({
+      unit: entry.unit, dayIso: entry.dayIso,
+      day: entry.result.header.day || entry.dayIso,
+      number, version,
+      persons: (entry.result.records || []).length,
+      verdict: row['Вердикт'],
+      vch: row['В/ч'], groups: row['Групи'], positions: row['Посад'],
+      filename: entry.file.name, sha256: entry.sha, size: entry.file.size,
+      uploadedAt: row['Завантажено'], replacedAt: '', status: 'Прийнято', note: '',
+    });
+  }
 
-  $('cal-month').addEventListener('change', (e) => {
-    state.calMonth = e.target.value;
-    renderCalendar();
+  return { rows, version, number, asArray };
+}
+
+function makeNumber(base, entry) {
+  const year = (entry.dayIso || '').slice(0, 4);
+  let max = 0;
+  for (const row of (base.summary && base.summary.rows) || []) {
+    const m = String(row.number || '').match(/^(\d{4})-(\d+)$/);
+    if (m && m[1] === year) max = Math.max(max, Number(m[2]));
+  }
+  return `${year}-${String(max + 1).padStart(4, '0')}`;
+}
+
+/* Аркуші для скачування: дані + Результат + Зведення. */
+function sheetsFor(base, merged) {
+  const sheets = [];
+
+  /* 1. Усі аркуші вихідної книги, крім наших службових. */
+  const source = (base && base.workbook && base.workbook.sheets) || [];
+  for (const sheet of source) {
+    if (sheet.name === SUMMARY_SHEET || sheet.name === RESULT_SHEET) continue;
+    sheets.push({
+      name: sheet.name,
+      rows: sheet.rows || [],
+      widths: [],
+      headerRow: null,
+    });
+  }
+
+  /* Якщо бази не було — беремо аркуші поточного файлу. */
+  if (!sheets.length) {
+    for (const sheet of merged.workbook.sheets || []) {
+      if (sheet.name === SUMMARY_SHEET || sheet.name === RESULT_SHEET) continue;
+      sheets.push({ name: sheet.name, rows: sheet.rows || [], widths: [], headerRow: null });
+    }
+  }
+
+  /* 2. Аркуш «Результат». */
+  sheets.push({
+    name: RESULT_SHEET,
+    rows: resultSheetRows(merged.result),
+    widths: [18, 10, 22, 60, 60],
+    headerRow: 1,
   });
 
-  $('person-search').addEventListener('input', (e) => {
-    state.personQuery = e.target.value.trim();
-    renderPersons();
+  /* 3. Аркуш «Зведення» — база. */
+  const summaryRows = [SUMMARY_HEADER.slice()];
+  const sorted = merged.rows.slice().sort((a, b) =>
+    (a.unit || '').localeCompare(b.unit || '', 'uk')
+    || String(a.dayIso).localeCompare(String(b.dayIso)));
+  for (const row of sorted) {
+    summaryRows.push([
+      row.unit, row.day || fmtDay(row.dayIso), row.number, row.version,
+      row.persons, row.verdict, row.vch, row.groups, row.positions, row.vch,
+      row.filename, row.sha256, row.size, row.uploadedAt, row.replacedAt,
+      row.status, row.note,
+    ]);
+  }
+  sheets.push({
+    name: SUMMARY_SHEET,
+    rows: summaryRows,
+    widths: [26, 12, 12, 8, 8, 22, 8, 8, 8, 8, 34, 66, 10, 18, 18, 12, 26],
+    headerRow: 1,
   });
-  $('persons-export').addEventListener('click', exportPersons);
 
-  $('cert-month').addEventListener('change', (e) => {
-    state.certMonth = e.target.value;
-    state.certDraft = null;
-    renderCerts();
-  });
-  $('cert-build').addEventListener('click', buildCertificates);
-  $('btn-day-summary').addEventListener('click', exportDaySummary);
+  return sheets;
+}
 
+/* ---------- результат на екрані ---------- */
+
+function renderResults(items) {
+  const box = $('results');
+  box.innerHTML = '';
+
+  for (const item of items) {
+    const card = el('div', 'result-card');
+
+    const head = el('div', 'result-head');
+    const name = el('div', 'result-name', item.file ? item.file.name : '');
+    head.appendChild(name);
+
+    if (item.ok) {
+      const badge = el('span', 'verdict verdict-' + item.result.verdict,
+        VERDICT_LABEL[item.result.verdict] || item.result.verdict);
+      head.appendChild(badge);
+    }
+    card.appendChild(head);
+
+    if (!item.ok) {
+      card.appendChild(el('div', 'result-error', item.message || 'Не вдалося прочитати файл'));
+      box.appendChild(card);
+      continue;
+    }
+
+    const counts = item.result.counts || {};
+    const meta = el('div', 'result-meta');
+    meta.appendChild(el('span', '', `ПУ: ${item.unit}`));
+    meta.appendChild(el('span', '', `Доба: ${item.result.header.day || fmtDay(item.dayIso)}`));
+    meta.appendChild(el('span', '', `Осіб: ${(item.result.records || []).length}`));
+    meta.appendChild(el('span', '',
+      `Знайдено: ${counts.critical || 0} критичних · ${counts.error || 0} помилок · ${counts.warning || 0} попереджень`));
+    card.appendChild(meta);
+
+    if (item.prev) {
+      const warn = el('div', 'result-warn');
+      warn.appendChild(el('strong', '', 'Запис за цю добу вже є. '));
+      warn.appendChild(el('span', '',
+        `Версія v${item.prev.version}, прийнято ${item.prev.uploadedAt || '—'}. `
+        + 'При підтвердженні рядок буде замінено, версія стане v'
+        + (item.prev.version + 1) + '.'));
+      card.appendChild(warn);
+    }
+
+    const findings = item.result.findings || [];
+    if (findings.length) {
+      const table = el('table', 'findings');
+      const thead = el('thead');
+      const hr = el('tr');
+      for (const title of ['', 'Код', 'Клітинка', 'Що не так', 'Що робити']) {
+        hr.appendChild(el('th', '', title));
+      }
+      thead.appendChild(hr);
+      table.appendChild(thead);
+      const tbody = el('tbody');
+      for (const f of findings.slice(0, 40)) {
+        const tr = el('tr', 'sev-' + f.severity);
+        tr.appendChild(el('td', 'sev', SEVERITY_LABEL[f.severity] || f.severity));
+        tr.appendChild(el('td', 'code', f.code || ''));
+        tr.appendChild(el('td', 'cell', f.cell || ''));
+        tr.appendChild(el('td', '', f.problem || ''));
+        tr.appendChild(el('td', 'hint', f.recommendation || ''));
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody);
+      card.appendChild(table);
+      if (findings.length > 40) {
+        card.appendChild(el('div', 'hint', `…і ще ${findings.length - 40} зауважень — усі в аркуші «Результат»`));
+      }
+    } else {
+      card.appendChild(el('div', 'result-ok', 'Зауважень немає'));
+    }
+
+    box.appendChild(card);
+  }
+}
+
+/* ---------- головний потік ---------- */
+
+async function handleFiles(fileList) {
+  if (state.busy) return;
+  const files = Array.from(fileList).filter((f) => f.name.toLowerCase().endsWith('.xlsx'));
+  if (!files.length) {
+    toast('Потрібен файл XLSX', 'error');
+    return;
+  }
+  const skipped = Array.from(fileList).filter((f) => !f.name.toLowerCase().endsWith('.xlsx'));
+  if (skipped.length) {
+    toast(`Пропущено не-XLSX: ${skipped.map((f) => f.name).join(', ')}`, 'error');
+  }
+
+  state.busy = true;
+  $('dropzone').classList.add('busy');
+  try {
+    const items = [];
+    for (const file of files) {
+      try {
+        items.push(await checkFile(file, state.base));
+      } catch (err) {
+        items.push({ file, ok: false, message: err.message });
+      }
+    }
+    renderResults(items);
+    state.pending = items.filter((i) => i.ok);
+
+    if (!state.pending.length) {
+      toast('Жоден файл не пройшов — нічого не змінено', 'error');
+      return;
+    }
+
+    const needConfirm = state.pending.filter((i) => i.prev);
+    const action = el('div', 'action-row');
+    const btn = el('button', 'btn btn-primary',
+      needConfirm.length
+        ? `Підтвердити й скачати файл (${state.pending.length})`
+        : `Скачати оновлений файл (${state.pending.length})`);
+    btn.id = 'btn-save';
+    btn.addEventListener('click', () => saveBase(needConfirm.length > 0));
+    action.appendChild(btn);
+    $('results').appendChild(action);
+  } finally {
+    state.busy = false;
+    $('dropzone').classList.remove('busy');
+  }
+}
+
+/* Записує всі перевірені файли в базу і віддає один XLSX. */
+async function saveBase(confirmed) {
+  if (!state.pending.length) return;
+
+  const problems = state.pending.filter((i) => i.prev);
+  if (problems.length && !confirmed) {
+    toast('Потрібне підтвердження перезапису', 'error');
+    return;
+  }
+
+  const btn = $('btn-save');
+  if (btn) { btn.disabled = true; btn.textContent = 'Формую файл…'; }
+
+  try {
+    let base = state.base || {
+      workbook: state.pending[0].workbook,
+      summary: { present: false, rows: [], headerOk: true, problems: [] },
+      fileName: 'база.xlsx',
+    };
+
+    const rows = base.summary.rows.slice();
+    let lastResult = null;
+
+    for (const entry of state.pending) {
+      const merged = mergeIntoBase(
+        { summary: { rows } },
+        entry,
+      );
+      /* замінюємо рядки накопичувально */
+      rows.length = 0;
+      Array.from(merged.rows).forEach((r) => rows.push(r));
+      lastResult = { entry, merged };
+
+      const sheets = sheetsFor(base, {
+        workbook: entry.workbook,
+        result: entry.result,
+        rows,
+      });
+      const blob = buildWorkbook(sheets);
+      const fileName = dbFileName(entry.unit, entry.dayIso, '_перевірено');
+      saveBlob(blob, fileName);
+
+      /* База для наступного файлу цієї ж сесії — уже з оновленим зведенням. */
+      base = {
+        workbook: base.workbook,
+        summary: { present: true, rows: rows.slice(), headerOk: true, problems: [] },
+        fileName,
+      };
+      await new Promise((r) => setTimeout(r, 400));
+    }
+
+    state.base = base;
+    toast(`Файл збережено: ${state.pending.length} подання`, 'ok');
+    state.pending = [];
+    if (btn) btn.remove();
+    updateCertUnits();
+  } catch (err) {
+    toast('Не вдалося сформувати файл: ' + err.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Підтвердити й скачати файл'; }
+  }
+}
+
+/* ---------- довідки ---------- */
+
+function updateCertUnits() {
+  const select = $('cert-unit');
+  if (!select) return;
+  if (!state.base) return;
+  const units = Array.from(new Set(
+    (state.base.summary.rows || []).map((r) => r.unit))).sort((a, b) => a.localeCompare(b, 'uk'));
+  const current = select.value;
+  select.innerHTML = '';
+  const all = el('option', '', 'усі');
+  all.value = '';
+  select.appendChild(all);
+  for (const unit of units) {
+    const opt = el('option', '', unit);
+    opt.value = unit;
+    select.appendChild(opt);
+  }
+  if (current && units.includes(current)) select.value = current;
+}
+
+async function loadCertBase(file) {
+  try {
+    const buffer = await file.arrayBuffer();
+    const workbook = await readWorkbook(buffer);
+    const summary = readSummary(workbook);
+    state.base = { workbook, summary, fileName: file.name };
+
+    if (!summary.present) {
+      $('cert-status').textContent = 'У файлі немає аркуша «Зведення» — '
+        + 'спершу перевірте розрахунок і скачайте оновлений файл.';
+      $('cert-results').innerHTML = '';
+      updateCertUnits();
+      return;
+    }
+    if (!summary.headerOk) {
+      $('cert-status').textContent = (summary.problems || []).join('. ');
+      $('cert-results').innerHTML = '';
+      updateCertUnits();
+      return;
+    }
+
+    $('cert-status').textContent = `У «Зведенні» ${summary.rows.length} записів.`;
+    updateCertUnits();
+    if (!state.certMonth) {
+      const last = summary.rows.reduce((acc, r) => (r.dayIso > acc ? r.dayIso : acc), '');
+      state.certMonth = last ? last.slice(0, 7) : '';
+      if (state.certMonth) $('cert-month').value = state.certMonth;
+    }
+  } catch (err) {
+    $('cert-status').textContent = 'Не вдалося прочитати файл: ' + err.message;
+  }
+}
+
+function buildCerts() {
+  if (!state.base || !state.base.summary || !state.base.summary.headerOk) {
+    toast('Спершу завантажте файл із аркушем «Зведення»', 'error');
+    return;
+  }
+  const month = $('cert-month').value;
+  if (!month) {
+    toast('Оберіть місяць', 'error');
+    return;
+  }
+  state.certMonth = month;
+  const unit = $('cert-unit').value;
+
+  const { certs, issues } = buildMonthlyCerts(state.base.summary, null, month, unit);
+  if (!certs.length) {
+    $('cert-issues').innerHTML = '';
+    $('cert-results').innerHTML = '';
+    $('cert-status').textContent = `За ${monthTitleUk(month)} у «Зведенні» немає записів`
+      + (unit ? ` для ПУ «${unit}»` : '') + '.';
+    return;
+  }
+
+  renderCertIssues(issues, month, certs);
+
+  const sheets = certSheets(certs, month, issues);
+  const blob = buildWorkbook(sheets);
+  const suffix = unit ? `_${unit.replace(/[\\/:*?"<>|]/g, '-')}` : '';
+  saveBlob(blob, `Довідки_${month}${suffix}.xlsx`);
+  toast('Довідку сформовано й скачано', 'ok');
+}
+
+function renderCertIssues(issues, month, certs) {
+  const box = $('cert-issues');
+  box.innerHTML = '';
+
+  const parts = [];
+  if (issues.missing.length) {
+    parts.push(`<strong>${issues.missing.length}</strong> діб без подання`);
+  }
+  if (issues.lowVerdict.length) {
+    parts.push(`<strong>${issues.lowVerdict.length}</strong> подань із помилками`);
+  }
+  if (issues.emptyRows.length) {
+    parts.push(`<strong>${issues.emptyRows.length}</strong> порожніх подань`);
+  }
+  if (issues.conflicts.length) {
+    parts.push(`<strong>${issues.conflicts.length}</strong> конфліктів чергування`);
+  }
+
+  const summary = el('div', '');
+  summary.innerHTML = parts.length
+    ? `За ${monthTitleUk(month)}: ${parts.join(', ')}.`
+    : `За ${monthTitleUk(month)} зауважень немає.`;
+  box.appendChild(summary);
+
+  if (issues.missing.length) {
+    const first = issues.missing.slice(0, 12).map((m) => `${m.unit} · ${fmtDay(m.day)}`);
+    box.appendChild(el('div', 'hint',
+      'Доби без подання: ' + first.join('; ')
+      + (issues.missing.length > 12 ? ` …і ще ${issues.missing.length - 12}` : '')
+      + '. Повний перелік — аркуш «Пропущені доби» у довідці.'));
+  }
+
+  const list = el('div', 'result-meta');
+  for (const cert of certs) {
+    list.appendChild(el('span', '',
+      `${cert.unit}: діб ${cert.presentCount}, осіб ${cert.persons}`));
+  }
+  $('cert-results').innerHTML = '';
+  $('cert-results').appendChild(list);
+}
+
+/* ---------- прив'язка подій ---------- */
+
+function bind() {
   const drop = $('dropzone');
-  const input = $('upload-files');
+  const input = $('file-input');
   drop.addEventListener('click', () => input.click());
-  input.addEventListener('change', () => { addFiles(input.files); input.value = ''; });
+  input.addEventListener('change', () => {
+    if (input.files && input.files.length) handleFiles(input.files);
+    input.value = '';
+  });
   ['dragenter', 'dragover'].forEach((evt) => {
     drop.addEventListener(evt, (e) => { e.preventDefault(); drop.classList.add('over'); });
   });
   ['dragleave', 'drop'].forEach((evt) => {
     drop.addEventListener(evt, (e) => { e.preventDefault(); drop.classList.remove('over'); });
   });
-  drop.addEventListener('drop', (e) => addFiles(e.dataTransfer.files));
-
-  document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
-    if ($('upload-modal').classList.contains('open')) closeUpload();
-    else closeDrawer();
+  drop.addEventListener('drop', (e) => {
+    if (e.dataTransfer && e.dataTransfer.files) handleFiles(e.dataTransfer.files);
   });
+
+  $('cert-file').addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) await loadCertBase(file);
+    e.target.value = '';
+  });
+  $('cert-build').addEventListener('click', buildCerts);
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -1208,5 +550,4 @@ document.addEventListener('DOMContentLoaded', async () => {
   } catch (err) {
     toast(err.message, 'error');
   }
-  setTab('day');
 });
